@@ -1,45 +1,47 @@
-# Seat Reclaim for Jira
+# Access Review for Jira
 
-Finds licensed Jira users who have done nothing in a chosen period, then frees their
-seats safely: the admin reviews the list, confirms, and the app takes each person out of
-the groups that give them a product. Every change is logged and can be undone.
+Quarterly user access reviews for Jira Cloud, with evidence. The app takes a snapshot of
+every group on the site (empty ones included), who is in each, which product each group
+grants, who holds an admin group, and whether each person did anything in Jira in a window
+you choose. Reviewers mark each person Keep, Remove or Follow up, add notes, and sign the
+review off with their name and the time. The evidence is an Excel workbook (Summary, Users,
+Groups) or a CSV. The next review shows who was added, who left and who became an admin.
 
-It reuses the activity engine from License Audit for Jira (same rules for what counts as
-activity, same exhaustive per-user check). See `src/lib/jira.js`.
+Read-only: there is no write scope, so the platform itself prevents the app from changing
+anything. To act on the Remove list, use Atlassian Administration or Seat Reclaim for Jira.
 
-## How a seat is reclaimed
+## How the snapshot is built
 
-A Jira Cloud seat comes from membership of a product's access group. Removing a user from
-every group that grants a product frees that seat at once (proved on the demo site on
-10 October 2026: Product Discovery 34,999 → 34,998 → 34,999 seats left).
+`roles → groups → members → issues → verify → finalize`, in the background worker
+(`src/worker.js`), each step bounded and resumable.
 
-| Rule | Where |
+| Step | Source |
 | --- | --- |
-| Never remove anyone from an admin group (`/admin/i`); those products stay | `planReclaim` |
-| Never act on the person running the app, or on the protected list | `protectedReasonFor` |
-| Re-read the user's groups live before acting; the scan is a snapshot | `reclaim` resolver |
-| Only leave groups that actually free a product | `planReclaim` |
-| Log exactly which groups were left; undo rejoins exactly those | `saveEntry`, `undo` |
-| Group changes run as the signed-in admin (`asUser`), never as the app | `src/lib/reclaim.js` |
+| Which groups grant which product, and Atlassian's seat counts | `GET /rest/api/3/applicationrole` |
+| Every group, including empty ones | `GET /rest/api/3/group/bulk` |
+| Members of each group (active Atlassian accounts; bots and customers left out) | `GET /rest/api/3/group/member` |
+| Who did something recently, and when | the License Audit activity engine (`src/lib/jira.js`): a sweep of recently updated issues, then an exhaustive per-user JQL check for everyone the sweep could not vouch for |
 
-Jira requires a **site admin** for group membership changes. A Jira admin who is not a
-site admin can scan and review, and gets a clear message if they try to reclaim.
-
-## Permissions
-
-Read scopes as License Audit, plus one write scope, `manage:jira-configuration`, used only
-for `DELETE` and `POST /rest/api/3/group/user`. A test enforces that this is the only write
-scope and that no other module makes write calls.
+Admin groups are recognised by name (`/admin/i`), the same rule Seat Reclaim uses, because
+Jira Cloud exposes no API for global permissions.
 
 ## Storage
 
-Account IDs, group IDs, products and inactivity bands. Names and emails are looked up at
-read time. The action log and protected list hold IDs only.
+Per review: account IDs, group IDs, product names, activity bands, decisions and notes.
+Names and emails are resolved from Jira at read time. The last 12 reviews are kept.
 
 ## Commands
 
 ```bash
 npm test                 # unit tests
-npm run deploy           # build the CSV frame and deploy to development
+npm run deploy           # build the export frame and deploy to development
 forge install --site one-atlas-afgn.atlassian.net --product jira --environment development
 ```
+
+App id `37b81c92-ff57-40a7-8706-f459ac83d2d1` (Developer Space TELCOMA Global). Development page on
+the demo site: `/jira/settings/apps/37b81c92-ff57-40a7-8706-f459ac83d2d1/6f88fbf6-322e-499b-8168-f46ddf9d12bb`.
+
+## Next
+
+- Rovo agent (read-only: "who has access to X", "what changed since the last review").
+- Confluence edition: same review over Confluence groups (`/wiki/rest/api/group?accessType=…`).
