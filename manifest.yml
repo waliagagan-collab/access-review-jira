@@ -1,0 +1,46 @@
+modules:
+  jira:adminPage:
+    - key: access-review-page
+      resource: main
+      render: native
+      resolver:
+        function: resolver
+      title: Access Review
+  consumer:
+    - key: scan-consumer
+      queue: scan-queue
+      # @forge/events v2+ invokes this function directly. The deprecated
+      # `resolver:` form belongs to v1.x and makes the queue push fail.
+      function: scan-worker
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: scan-worker
+      handler: worker.handler
+      # Slices stop themselves at SLICE.softBudgetMs; this is the hard ceiling
+      # that leaves room for the final storage writes of a slice.
+      timeoutSeconds: 60
+resources:
+  - key: main
+    path: src/frontend/index.jsx
+  # Custom UI resource rendered inside a UI Kit <Frame>: its only job is the
+  # evidence download, which UI Kit components cannot trigger themselves.
+  - key: export-frame
+    path: static/export
+app:
+  runtime:
+    name: nodejs22.x
+  licensing:
+    enabled: true
+  id: ari:cloud:ecosystem::app/37b81c92-ff57-40a7-8706-f459ac83d2d1
+permissions:
+  scopes:
+    # Every scope is read-only. There is deliberately no write scope, so the
+    # platform itself prevents this app from changing anything.
+    - read:jira-user # users' current groups; the site directory fallback
+    - read:jira-work # recent issue activity: who did what, and when
+    - read:application-role:jira # which groups grant which product, and Atlassian's seat counts
+    - read:group:jira # every group on the site and its members
+    - read:user:jira # active flag and account type, to leave out bots and customers
+    - read:avatar:jira # required alongside read:user:jira by the group-member endpoint
+    - storage:app

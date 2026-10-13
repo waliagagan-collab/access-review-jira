@@ -1,0 +1,12 @@
+/* Mirrors Atlassian's default button so the frame reads as part of the page. */
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-size: 14px; color: #172B4D; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
+button { font: inherit; font-weight: 500; height: 32px; padding: 0 12px; border: 0; border-radius: 3px; background: #F1F2F4; color: #172B4D; cursor: pointer; }
+button:hover { background: #DCDFE4; }
+button:disabled { background: #F1F2F4; color: #8993A4; cursor: not-allowed; }
+button.subtle { background: transparent; }
+button.subtle:hover { background: #F1F2F4; }
+.status { color: #626F86; }
+textarea { width: 100%; box-sizing: border-box; margin-top: 8px; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; border: 1px solid #DCDFE4; border-radius: 3px; padding: 6px; }
+label { color: #626F86; }
+select { font: inherit; height: 32px; padding: 0 8px; border: 1px solid #DCDFE4; border-radius: 3px; background: #fff; color: #172B4D; max-width: 320px; }

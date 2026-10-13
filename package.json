@@ -1,0 +1,35 @@
+{
+  "name": "access-review-jira",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quarterly user access reviews for Jira Cloud, with activity evidence and sign-off",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "lint": "forge lint",
+    "login": "forge login",
+    "logout": "forge logout",
+    "whoami": "forge whoami",
+    "register": "forge register",
+    "deploy": "npm run build:frame && forge deploy",
+    "app:install": "forge install",
+    "tunnel": "forge tunnel",
+    "build:frame": "esbuild src/frame/index.js --bundle --minify --format=iife --target=es2020 --outfile=static/export/index.js",
+    "sbom": "node scripts/sbom.mjs"
+  },
+  "dependencies": {
+    "@forge/api": "^8.2.0",
+    "@forge/bridge": "^7.1.0",
+    "@forge/events": "^3.0.7",
+    "@forge/kvs": "^2.0.7",
+    "@forge/react": "^12.3.0",
+    "@forge/resolver": "^2.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "fflate": "^0.8.3"
+  },
+  "overrides": {
+    "prosemirror-view": "^1.42.3"
+  }
+}
