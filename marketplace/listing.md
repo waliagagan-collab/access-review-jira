@@ -31,6 +31,14 @@ Access Review answers it in one place.
 
 **Read-only.** No write permission exists, so the app cannot change anything. To act on the Remove list, use Atlassian Administration, or Seat Reclaim for Jira, which removes access with an undo. **Runs on Atlassian;** no servers of ours.
 
+## Highlights (title ≤ 50, description ≤ 220)
+
+Images in `assets/2026-10-13/` (1840x900): highlight-1-review, highlight-2-groups, highlight-3-signed-off. Logo and banner in `assets/`.
+
+1. **Every user, every group, one review** — The snapshot lists everyone in every group with the products their groups grant, who holds an admin group, and their last activity. Mark each person Keep, Remove or Follow up, with a note.
+2. **Groups, with what they grant** — Every group on the site at snapshot time, the products it grants, how many members it has, and which groups are empty. Admin groups are marked.
+3. **Sign off, then hand over the evidence** — Signing off records who approved the review and when, and locks it. Download an Excel workbook (Summary, Users, Groups) for your auditor. The last 12 reviews stay available.
+
 ## Pricing (per user per month, graduated)
 
 Free ≤10; 1–100 $1.00; 101–250 $0.60; 251–1000 $0.35; 1001–2500 $0.25; 2501–5000 $0.20; 5001–7500 $0.17; 7501–10000 $0.15; 10001+ $0.12. Multi-instance the same.
