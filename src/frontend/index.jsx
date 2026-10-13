@@ -570,6 +570,8 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
             emptyView={<Text>No users match these filters.</Text>}
           />
 
+          {/* UI Kit allows one Frame per module, so the evidence download lives here
+              and offers every review; the Past reviews tab has none. */}
           <Frame key={`${review.id}-${review.status}`} resource="export-frame" />
         </Stack>
       )}
@@ -743,7 +745,10 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
   if (!reviews.length) return <Text>No reviews yet.</Text>;
   return (
     <Stack space="space.150">
-      <Text>The last {reviews.length} {reviews.length === 1 ? 'review' : 'reviews'}. Open one to see it in the Review tab, or download its evidence file below.</Text>
+      <Text>
+        The last {reviews.length} {reviews.length === 1 ? 'review' : 'reviews'}. Open one to see it in the Review tab; the
+        evidence download there lets you pick any review.
+      </Text>
       <DynamicTable
         head={{
           cells: [
@@ -792,7 +797,6 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
           ],
         }))}
       />
-      <Frame key="past-export" resource="export-frame" />
     </Stack>
   );
 }
