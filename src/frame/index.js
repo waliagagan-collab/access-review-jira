@@ -1,6 +1,6 @@
 import { invoke } from '@forge/bridge';
 import { buildXlsx, toCsv } from './xlsx.js';
-import { sheetsOf } from './evidence.js';
+import { sheetsOf, day } from './evidence.js';
 
 /**
  * The one thing UI Kit cannot do is hand the browser a file. This tiny

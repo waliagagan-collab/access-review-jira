@@ -3,8 +3,8 @@
  * Forge imports, so the same code is tested under plain Node.
  */
 const DECISION_WORDS = { keep: 'Keep', remove: 'Remove', flag: 'Follow up' };
-const day = (iso) => (iso ? String(iso).slice(0, 10) : '');
-const stamp = (iso) => (iso ? String(iso).slice(0, 16).replace('T', ' ') + ' UTC' : '');
+export const day = (iso) => (iso ? String(iso).slice(0, 10) : '');
+export const stamp = (iso) => (iso ? String(iso).slice(0, 16).replace('T', ' ') + ' UTC' : '');
 
 const activity = (r) => (r.active ? (r.lastActivityAt ? `Active (last seen ${day(r.lastActivityAt)})` : 'Active in the window') : `No activity${r.label ? ` (${r.label})` : ''}`);
 
