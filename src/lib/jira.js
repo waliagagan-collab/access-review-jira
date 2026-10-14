@@ -157,8 +157,11 @@ export async function fetchGroupMemberPage(groupId, startAt) {
   return {
     users: filterLicensedUsers(values),
     rawCount: values.length,
-    isLast: Boolean(body?.isLast) || values.length < GROUP_PAGE,
-    nextStartAt: startAt + GROUP_PAGE,
+    // Jira says when a page is the last one. A short page is not proof of it
+    // (the API may hand back fewer than asked for), so only an empty page ends
+    // the listing on its own, and the next page starts where this one ended.
+    isLast: Boolean(body?.isLast) || values.length === 0,
+    nextStartAt: startAt + values.length,
   };
 }
 
@@ -174,24 +177,8 @@ export async function fetchGroupListPage(startAt) {
   const values = body?.values ?? [];
   return {
     groups: values.filter((g) => g?.groupId).map((g) => ({ groupId: g.groupId, name: g.name ?? g.groupId })),
-    isLast: Boolean(body?.isLast) || values.length < GROUP_LIST_PAGE,
-    nextStartAt: startAt + GROUP_LIST_PAGE,
-  };
-}
-
-/**
- * Fallback only: the whole site directory. Used when application roles are
- * unreadable. It includes Confluence-only accounts, so the report is labelled
- * accordingly rather than presented as seat-accurate.
- */
-export async function fetchDirectoryPage(startAt, pageSize) {
-  const params = searchParams({ startAt, maxResults: pageSize });
-  const batch = await getJson(route`/rest/api/3/users/search?${params}`);
-  return {
-    users: filterLicensedUsers(batch),
-    // Pagination follows the RAW page length, not the filtered length, or a
-    // page of bots would end the sweep early.
-    isLast: !Array.isArray(batch) || batch.length < pageSize,
+    isLast: Boolean(body?.isLast) || values.length === 0,
+    nextStartAt: startAt + values.length,
   };
 }
 

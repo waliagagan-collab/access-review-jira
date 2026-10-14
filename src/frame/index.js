@@ -1,6 +1,7 @@
 import { invoke } from '@forge/bridge';
 import { buildXlsx, toCsv } from './xlsx.js';
 import { sheetsOf, day } from './evidence.js';
+import { decisionStats } from '../lib/review.js';
 
 /**
  * The one thing UI Kit cannot do is hand the browser a file. This tiny
@@ -55,10 +56,19 @@ async function download(kind) {
   $('status').textContent = 'Preparing…';
   try {
     const reviewId = $('review').value;
-    const res = await invoke('getReview', { reviewId });
-    if (!res?.ok) throw new Error(res?.error ?? 'could not read the review');
-    const sheets = sheetsOf(res.review, res.rows ?? [], res.stats);
-    const name = `access-review-${day(res.review.startedAt)}`;
+    // A review arrives in pages; the first carries the record and the groups.
+    const first = await invoke('getReview', { reviewId, page: 0 });
+    if (!first?.ok) throw new Error(first?.error ?? 'could not read the review');
+    let rows = first.rows ?? [];
+    for (let p = 1; p < (first.pages ?? 1); p++) {
+      $('status').textContent = `Preparing… ${rows.length} users so far`;
+      const res = await invoke('getReview', { reviewId, page: p });
+      if (!res?.ok) throw new Error(res?.error ?? 'could not read the review');
+      rows = rows.concat(res.rows ?? []);
+    }
+    const stats = decisionStats(rows, Object.fromEntries(rows.map((r) => [r.accountId, { decision: r.decision }])));
+    const sheets = sheetsOf(first.review, rows, stats);
+    const name = `access-review-${day(first.review.startedAt)}`;
     if (kind === 'xlsx') {
       const blob = new Blob([buildXlsx(sheets)], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -69,8 +79,7 @@ async function download(kind) {
       // The BOM makes Excel open the CSV as UTF-8 without an import wizard.
       offerDownload(new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' }), `${name}.csv`);
     }
-    const capped = res.limit && (res.rows ?? []).length >= res.limit ? ` (capped at ${res.limit} users)` : '';
-    $('status').textContent = `${(res.rows ?? []).length} users${capped}.`;
+    $('status').textContent = `${rows.length} users.`;
   } catch (err) {
     $('status').textContent = `Could not build the file: ${err?.message ?? 'no response'}.`;
   } finally {

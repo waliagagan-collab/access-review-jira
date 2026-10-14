@@ -3,13 +3,21 @@
  * in the browser, in resolvers and under plain Node tests.
  *
  * A review is a snapshot: every user who holds a seat or sits in a group,
- * with their products, groups, whether they are an admin, and whether they
- * did anything in Jira in the window. Reviewers mark each person Keep, Remove
- * or Flag, then sign the review off. The next review shows what changed.
+ * with their products, groups, whether they sit in an admin group, and
+ * whether they did anything in Jira in the window. Reviewers mark each person
+ * Keep, Remove or Flag, then sign the review off. The next review shows what
+ * changed.
  */
 
-/** Groups that confer administration, recognised by name. Deliberately broad. */
-export const isAdminGroupName = (name) => /admin/i.test(String(name ?? ''));
+/**
+ * Groups that confer administration, recognised by name: "admin", "admins",
+ * "administrator(s)" or "sysadmin" as a whole word, so "site-admins" and
+ * "jira-administrators" count but "badminton-club" and
+ * "administrative-assistants" do not. Jira Cloud has no API that says which
+ * groups hold global permissions, so this is a name rule, and the page and
+ * the evidence file label it as one.
+ */
+export const isAdminGroupName = (name) => /(^|[^a-z])(sys)?admin(s|istrator|istrators)?($|[^a-z])/i.test(String(name ?? ''));
 
 export const DECISIONS = ['keep', 'remove', 'flag'];
 export const DECISION_WORDS = { keep: 'Keep', remove: 'Remove', flag: 'Follow up' };
@@ -65,11 +73,26 @@ export function groupSummary(groupsAll, rows) {
     .sort((a, b) => Number(b.admin) - Number(a.admin) || b.licensedMembers - a.licensedMembers || a.name.localeCompare(b.name));
 }
 
+/**
+ * Pure: mark each current row with what changed for that person since the
+ * previous review. Rows carry their own flags, so there is no cap.
+ */
+export function flagChanges(current, previous) {
+  const prev = new Map((previous ?? []).map((r) => [r.accountId, r]));
+  return (current ?? []).map((r) => {
+    const p = prev.get(r.accountId);
+    if (!p) return { ...r, newSinceLast: true };
+    if (r.admin && !p.admin) return { ...r, becameAdmin: true };
+    return r;
+  });
+}
+
 const CAP = 500;
 
 /**
- * Pure: what changed since the previous review, by account id. Lists are
- * capped so the review record stays small; the counts are always exact.
+ * Pure: what changed since the previous review, by account id. The lists are
+ * capped so the review record stays small (rows carry their own flags); the
+ * counts are always exact.
  */
 export function diffReviews(current, previous) {
   const prev = new Map((previous ?? []).map((r) => [r.accountId, r]));
@@ -142,10 +165,4 @@ export function quarterName(iso) {
   const d = new Date(iso ?? Date.now());
   if (Number.isNaN(d.getTime())) return '';
   return `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}`;
-}
-
-/** Pure: the words shown in the Activity column and the evidence file. */
-export function activityText(r) {
-  if (r?.active) return r.lastActivityAt ? `Active · last seen ${String(r.lastActivityAt).slice(0, 10)}` : 'Active in the window';
-  return r?.label ? `No activity · ${r.label}` : 'No activity in the window';
 }

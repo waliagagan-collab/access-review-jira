@@ -1,6 +1,7 @@
 import ResolverModule from '@forge/resolver';
 import { Queue } from '@forge/events';
 import {
+  SHARDS,
   getScanState,
   setScanState,
   clearRun,
@@ -8,6 +9,8 @@ import {
   getReviewMeta,
   setReviewMeta,
   getReviewRows,
+  getReviewRowPages,
+  getReviewGroups,
   getDecisions,
   setDecisions,
   deleteReview,
@@ -31,8 +34,10 @@ const resolver = new Resolver();
 const define = (key, fn) => resolver.define(key, adminOnly(fn));
 const queue = new Queue({ key: 'scan-queue' });
 
-const ROW_LIMIT = 5000;
-const BULK_LIMIT = 5000;
+// A review is read in calls of this many stored row pages (1,000 rows for a
+// review saved by this version), so a large site never needs one long call.
+const ROW_PAGES_PER_CALL = 10;
+const BULK_LIMIT = 50_000;
 
 const licenseRefusal = (context) => {
   const gate = licenseGate(context?.license, context?.environmentType);
@@ -41,11 +46,11 @@ const licenseRefusal = (context) => {
     : { ok: false, unlicensed: true, error: licenseMessage(gate, context?.license) };
 };
 
-/** Review summaries for lists: everything but the big group table. */
+/** Review summaries for lists: everything but the big tables. */
 const summaryOf = (m) => {
   if (!m) return null;
   const { groups, changes, ...rest } = m;
-  return { ...rest, groupCount: groups?.length ?? 0, changeCounts: changes?.counts ?? null };
+  return { ...rest, groupCount: m.groupCount ?? groups?.length ?? 0, changeCounts: changes?.counts ?? null };
 };
 
 // --- snapshot -------------------------------------------------------------------
@@ -62,13 +67,15 @@ define('startReview', async ({ payload, context }) => {
   if (existing?.status === 'running' && !isStale(existing)) {
     return { ok: false, error: 'A review snapshot is already being built.' };
   }
-  if (existing?.run) await clearRun(existing.run);
+  if (existing?.run) await clearRun(existing.run, existing.groupPages ?? 0);
 
   const state = {
     run: `${Date.now()}`,
     status: 'running',
     phase: 'roles',
     days,
+    shards: SHARDS,
+    seq: 0,
     startedAt: new Date().toISOString(),
     startedBy: context?.accountId ?? null,
     finishedAt: null,
@@ -78,7 +85,7 @@ define('startReview', async ({ payload, context }) => {
   await setScanState(state);
 
   try {
-    await queue.push({ body: { run: state.run } });
+    await queue.push({ body: { run: state.run, seq: 0 } });
   } catch (err) {
     await setScanState({
       ...state,
@@ -96,7 +103,7 @@ define('cancelScan', async () => {
   const state = await getScanState();
   if (state?.status === 'running') {
     await setScanState({ ...state, status: 'cancelled', finishedAt: new Date().toISOString() });
-    await clearRun(state.run);
+    await clearRun(state.run, state.groupPages ?? 0);
   }
   return { ok: true };
 });
@@ -118,9 +125,10 @@ define('getStatus', async () => {
  * read time, so they are always current and never sit in storage. Decisions
  * and group names are attached the same way.
  */
-async function decorate(meta, rows) {
-  const [people, decisions] = await Promise.all([fetchUsersBulk(rows.map((r) => r.accountId)), getDecisions(meta.id)]);
-  const groupName = Object.fromEntries((meta.groups ?? []).map((g) => [g.id, g.name]));
+async function decorate(meta, groups, rows) {
+  const [people, decisions] = await Promise.all([fetchUsersBulk(rows.map((r) => r.accountId)), getDecisions(meta)]);
+  const groupName = Object.fromEntries(groups.map((g) => [g.id, g.name]));
+  // Reviews saved before rows carried their own flags have a capped list.
   const added = new Set(meta.changes?.added ?? []);
   const becameAdmin = new Set(meta.changes?.becameAdmin ?? []);
   return rows.map((r) => {
@@ -134,8 +142,8 @@ async function decorate(meta, rows) {
       note: d?.note ?? '',
       decidedBy: d?.by ?? null,
       decidedAt: d?.at ?? null,
-      newSinceLast: added.has(r.accountId),
-      becameAdmin: becameAdmin.has(r.accountId),
+      newSinceLast: Boolean(r.newSinceLast ?? added.has(r.accountId)),
+      becameAdmin: Boolean(r.becameAdmin ?? becameAdmin.has(r.accountId)),
     };
   });
 }
@@ -143,15 +151,21 @@ async function decorate(meta, rows) {
 define('getReview', async ({ payload }) => {
   const meta = await getReviewMeta(String(payload?.reviewId ?? ''));
   if (!meta) return { ok: false, error: 'That review was not found.' };
-  const rows = await decorate(meta, await getReviewRows(meta.id, ROW_LIMIT));
+  const pages = Math.max(1, Math.ceil((meta.pages ?? 0) / ROW_PAGES_PER_CALL));
+  const page = Math.min(pages - 1, Math.max(0, Math.floor(Number(payload?.page) || 0)));
+  const groups = await getReviewGroups(meta);
+  const stored = await getReviewRowPages(meta.id, page * ROW_PAGES_PER_CALL, (page + 1) * ROW_PAGES_PER_CALL);
+  const rows = await decorate(meta, groups, stored);
   const names = await fetchUsersBulk([meta.startedBy, meta.completedBy, ...rows.map((r) => r.decidedBy)].filter(Boolean));
   const name = (id) => (id ? (names[id]?.displayName ?? '(unknown)') : null);
+  const { groups: inline, ...rest } = meta;
   return {
     ok: true,
-    review: { ...meta, startedByName: name(meta.startedBy), completedByName: name(meta.completedBy) },
+    // The group table travels with the first page only; later pages are rows.
+    review: { ...rest, groups: page === 0 ? groups : [], startedByName: name(meta.startedBy), completedByName: name(meta.completedBy) },
     rows: rows.map((r) => ({ ...r, decidedByName: name(r.decidedBy) })),
-    stats: decisionStats(rows, Object.fromEntries(rows.map((r) => [r.accountId, { decision: r.decision }]))),
-    limit: ROW_LIMIT,
+    page,
+    pages,
   };
 });
 
@@ -165,18 +179,23 @@ async function openReview(reviewId) {
 }
 
 define('setDecision', async ({ payload, context }) => {
+  const refused = licenseRefusal(context);
+  if (refused) return refused;
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const accountId = String(payload?.accountId ?? '');
   if (!accountId) return { ok: false, error: 'No account given.' };
   const decision = normaliseDecision(payload?.decision);
-  const note = normaliseNote(payload?.note);
+  // Clearing the decision clears its note: the entry is removed as a whole.
+  const note = decision ? normaliseNote(payload?.note) : '';
   const at = new Date().toISOString();
-  await setDecisions(meta.id, [{ accountId, decision, note, by: context?.accountId ?? null, at }]);
+  await setDecisions(meta, [{ accountId, decision, note, by: context?.accountId ?? null, at }]);
   return { ok: true, decision, note, at };
 });
 
 define('setDecisionsBulk', async ({ payload, context }) => {
+  const refused = licenseRefusal(context);
+  if (refused) return refused;
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const decision = normaliseDecision(payload?.decision);
@@ -185,10 +204,12 @@ define('setDecisionsBulk', async ({ payload, context }) => {
   if (!ids.length) return { ok: false, error: 'No users selected.' };
   const at = new Date().toISOString();
   // Bulk never overwrites a decision someone already made by hand.
-  const existing = await getDecisions(meta.id);
-  const fresh = ids.filter((id) => !existing[id]?.decision);
-  await setDecisions(meta.id, fresh.map((accountId) => ({ accountId, decision, note: '', by: context?.accountId ?? null, at })));
-  return { ok: true, decided: fresh.length, skipped: ids.length - fresh.length };
+  const decided = await setDecisions(
+    meta,
+    ids.map((accountId) => ({ accountId, decision, note: '', by: context?.accountId ?? null, at })),
+    { onlyUnset: true }
+  );
+  return { ok: true, decided, skipped: ids.length - decided };
 });
 
 // --- sign-off ------------------------------------------------------------------------------
@@ -199,13 +220,15 @@ define('completeReview', async ({ payload, context }) => {
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const rows = await getReviewRows(meta.id);
-  const stats = decisionStats(rows, await getDecisions(meta.id));
+  const stats = decisionStats(rows, await getDecisions(meta));
   const at = new Date().toISOString();
   const updated = await setReviewMeta(meta.id, { status: 'complete', completedAt: at, completedBy: context?.accountId ?? null, stats });
   return { ok: true, review: summaryOf(updated) };
 });
 
 define('reopenReview', async ({ payload, context }) => {
+  const refused = licenseRefusal(context);
+  if (refused) return refused;
   const meta = await getReviewMeta(String(payload?.reviewId ?? ''));
   if (!meta) return { ok: false, error: 'That review was not found.' };
   const updated = await setReviewMeta(meta.id, {
@@ -216,6 +239,8 @@ define('reopenReview', async ({ payload, context }) => {
   return { ok: true, review: summaryOf(updated) };
 });
 
+// Deleting is never licence-gated: a customer whose subscription has ended
+// can still remove what the app holds.
 define('deleteReview', async ({ payload }) => {
   const id = String(payload?.reviewId ?? '');
   if (!(await getReviewMeta(id))) return { ok: false, error: 'That review was not found.' };

@@ -10,7 +10,7 @@ import {
   buildUserActivityJql,
   classifyDormancy,
 } from '../src/lib/jira.js';
-import { shardOf, SHARDS, mergeActive } from '../src/lib/store.js';
+import { shardOf, SHARDS, mergeActive, chunk, decisionShardsOf } from '../src/lib/store.js';
 import { isStale, normaliseDays, licenseGate, licenseMessage } from '../src/lib/scan.js';
 
 const person = (id) => ({ accountId: id, displayName: id });
@@ -253,6 +253,16 @@ test('sharding is deterministic, in range, and spreads accounts', () => {
   }
   assert.ok(Math.max(...counts) < 2000 * 0.35, 'badly skewed');
   assert.ok(Math.min(...counts) > 0, 'a shard is never used');
+});
+
+test('stored values are split into pages, and old reviews keep their 16 decision shards', () => {
+  assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  assert.deepEqual(chunk([], 2), []);
+  assert.deepEqual(chunk(undefined, 2), []);
+  assert.equal(decisionShardsOf({}), 16);
+  assert.equal(decisionShardsOf(null), 16);
+  assert.equal(decisionShardsOf({ decisionShards: 64 }), 64);
+  assert.equal(shardOf('712020:abc', 16) < 16, true);
 });
 
 // --- stuck-scan detection -----------------------------------------------------

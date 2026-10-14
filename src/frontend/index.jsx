@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ForgeReconciler, {
   Box,
   Button,
@@ -31,7 +31,7 @@ import ForgeReconciler, {
 import { invoke, view } from '@forge/bridge';
 import { licenseGate, licenseMessage } from '../lib/scan.js';
 import { scanProgress, showReviewPrompt } from '../lib/ui.js';
-import { DECISIONS, DECISION_WORDS, decisionStats, filterReviewRows, quarterName } from '../lib/review.js';
+import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName } from '../lib/review.js';
 
 const REVIEW_URL = 'https://marketplace.atlassian.com/search?query=Access%20Review%20for%20Jira';
 
@@ -49,7 +49,7 @@ const phaseText = (s) => {
     case 'roles':
       return 'Reading which groups grant which product';
     case 'groups':
-      return `Listing groups — ${Object.keys(s.groupsAll ?? {}).length} so far`;
+      return `Listing groups — ${s.groupCount ?? 0} so far`;
     case 'members':
       return `Listing group members — ${s.usersFound ?? 0} memberships read`;
     case 'issues':
@@ -108,7 +108,8 @@ const HowItWorks = ({ compact, onToggle }) =>
           <Strong>Start a review</Strong> and the app takes a snapshot of the site: every group (including empty ones),
           who is in it, which product each group grants, who holds an admin group, and whether each person did
           anything in Jira in the window: created or reported an issue, changed a status or field, commented or
-          logged work. Every candidate is checked against all issues, not a sample.
+          logged work. Every candidate is checked against all issues the app can see, not a sample. Admin groups are
+          recognised by name.
         </Text>
         <Text>
           Then review: mark each person <Strong>Keep</Strong>, <Strong>Remove</Strong> or <Strong>Follow up</Strong>,
@@ -138,7 +139,7 @@ const HowItWorks = ({ compact, onToggle }) =>
 const ALL = { label: 'Everyone', value: '' };
 const VIEWS = [
   ALL,
-  { label: 'Admins', value: 'admins' },
+  { label: 'In admin groups', value: 'admins' },
   { label: 'Active in the window', value: 'active' },
   { label: 'No activity in the window', value: 'inactive' },
   { label: 'New since previous review', value: 'new' },
@@ -170,7 +171,7 @@ function StartReview({ gate, running, stale, busy, onStart, period, setPeriod, h
   );
 }
 
-function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, reload, loading, loadError }) {
+function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loading, loadError }) {
   const [period, setPeriod] = useState(PERIODS[2]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
@@ -228,15 +229,20 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
   const locked = review?.status === 'complete';
 
   // Decisions are applied on the page first and sent after, so a slow network
-  // never makes a click feel ignored. A refused change is put back.
-  const decide = async (row, decision, note = row.note ?? '') => {
+  // never makes a click feel ignored. A refused change is put back. Clearing
+  // a decision clears its note too, as the server does.
+  const decide = async (row, decision, note = decision ? (row.note ?? '') : '') => {
     const previous = { decision: row.decision, note: row.note };
     setRows((prev) => prev.map((r) => (r.accountId === row.accountId ? { ...r, decision, note } : r)));
     try {
       const res = await invoke('setDecision', { reviewId: review.id, accountId: row.accountId, decision, note });
       if (!res?.ok) throw new Error(res?.error ?? 'refused');
       setRows((prev) =>
-        prev.map((r) => (r.accountId === row.accountId ? { ...r, decidedAt: res.at ?? null, decidedByName: decision ? 'you' : null } : r))
+        prev.map((r) =>
+          r.accountId === row.accountId
+            ? { ...r, decision: res.decision ?? decision, note: res.note ?? note, decidedAt: res.at ?? null, decidedByName: decision ? 'you' : null }
+            : r
+        )
       );
     } catch (err) {
       setRows((prev) => prev.map((r) => (r.accountId === row.accountId ? { ...r, ...previous } : r)));
@@ -378,7 +384,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
             <Text>
               Snapshot {fmtTime(review.generatedAt)}
               {review.startedByName ? ` by ${review.startedByName}` : ''} · {plural(review.counts?.users ?? 0, 'user', 'users')} ·{' '}
-              {plural(review.counts?.admins ?? 0, 'admin', 'admins')} · {review.counts?.inactive ?? 0} with no activity in{' '}
+              {review.counts?.admins ?? 0} in admin groups · {review.counts?.inactive ?? 0} with no activity in{' '}
               {review.days} days · {review.counts?.noAccess ?? 0} with no product access
             </Text>
             {locked && (
@@ -480,7 +486,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
 
           <Text>
             Showing {visible.length} of {rows.length}
-            {review.rowCount > rows.length ? ` (the first ${rows.length} of ${review.rowCount})` : ''}
+            {loading && review.rowCount > rows.length ? ` · loading the rest, ${review.rowCount} in all` : ''}
           </Text>
 
           <DynamicTable
@@ -502,7 +508,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
                     <Stack space="space.025">
                       <Inline space="space.050" alignBlock="center" shouldWrap>
                         <Text>{r.displayName}</Text>
-                        {r.admin && <Lozenge appearance="new">Admin</Lozenge>}
+                        {r.admin && <Lozenge appearance="new">Admin group</Lozenge>}
                         {r.newSinceLast && <Lozenge>New</Lozenge>}
                         {r.becameAdmin && <Lozenge appearance="moved">New admin</Lozenge>}
                       </Inline>
@@ -621,7 +627,14 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, stats, relo
             <ModalBody>
               <Stack space="space.100">
                 <Label labelFor="note">Why this decision, or what to follow up</Label>
-                <Textfield id="note" name="note" defaultValue={noteText} placeholder="e.g. Contractor, contract ends 31 Dec" onChange={(e) => setNoteText(e?.target?.value ?? '')} />
+                <Textfield
+                  id="note"
+                  name="note"
+                  defaultValue={noteText}
+                  maxLength={MAX_NOTE}
+                  placeholder="e.g. Contractor, contract ends 31 Dec"
+                  onChange={(e) => setNoteText(e?.target?.value ?? '')}
+                />
               </Stack>
             </ModalBody>
             <ModalFooter>
@@ -755,7 +768,7 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
             { key: 'when', content: 'Snapshot' },
             { key: 'status', content: 'Status' },
             { key: 'users', content: 'Users' },
-            { key: 'admins', content: 'Admins' },
+            { key: 'admins', content: 'In admin groups' },
             { key: 'inactive', content: 'No activity' },
             { key: 'decisions', content: 'Decisions' },
             { key: 'act', content: '' },
@@ -815,6 +828,7 @@ const App = () => {
   const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [toDelete, setToDelete] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
     view
@@ -839,27 +853,45 @@ const App = () => {
     refresh();
   }, [refresh]);
 
-  // The newest review is the one to show, unless the admin opened another.
+  // The newest review is the one to show, unless the admin opened another. A
+  // snapshot that has just finished is opened once; after that the admin's
+  // own choice stands, even though the scan record keeps naming that run.
   const latestId = status?.reviews?.[0]?.id ?? null;
   const finishedRun = status?.state?.status === 'complete' ? status.state.reviewId : null;
+  const autoOpened = useRef(null);
   useEffect(() => {
     if (!currentId && latestId) setCurrentId(latestId);
-    if (finishedRun && finishedRun !== currentId && latestId === finishedRun) setCurrentId(finishedRun);
+    if (finishedRun && latestId === finishedRun && autoOpened.current !== finishedRun) {
+      autoOpened.current = finishedRun;
+      if (currentId !== finishedRun) setCurrentId(finishedRun);
+    }
   }, [latestId, finishedRun, currentId]);
 
+  // A review arrives in pages; the table fills as they land. Switching review
+  // mid-load abandons the earlier load.
+  const loadSeq = useRef(0);
   const reload = useCallback(async () => {
     if (!currentId) return;
+    const seq = ++loadSeq.current;
+    const current = () => seq === loadSeq.current;
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await invoke('getReview', { reviewId: currentId });
-      if (!res?.ok) throw new Error(res?.error ?? 'could not load the review');
-      setData(res);
-      setRows(res.rows ?? []);
+      const first = await invoke('getReview', { reviewId: currentId, page: 0 });
+      if (!first?.ok) throw new Error(first?.error ?? 'could not load the review');
+      if (!current()) return;
+      setData(first);
+      setRows(first.rows ?? []);
+      for (let p = 1; p < (first.pages ?? 1); p++) {
+        const res = await invoke('getReview', { reviewId: currentId, page: p });
+        if (!res?.ok) throw new Error(res?.error ?? 'could not load the review');
+        if (!current()) return;
+        setRows((prev) => prev.concat(res.rows ?? []));
+      }
     } catch (err) {
-      setLoadError(`Could not load the review: ${err?.message ?? 'no response'}.`);
+      if (current()) setLoadError(`Could not load the review: ${err?.message ?? 'no response'}.`);
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [currentId]);
 
@@ -871,14 +903,18 @@ const App = () => {
     const r = toDelete;
     setToDelete(null);
     setBusy(true);
+    setDeleteError(null);
     try {
-      await invoke('deleteReview', { reviewId: r.id });
+      const res = await invoke('deleteReview', { reviewId: r.id });
+      if (!res?.ok) throw new Error(res?.error ?? 'refused');
+      await refresh();
       if (r.id === currentId) {
         setCurrentId(null);
         setData(null);
         setRows([]);
       }
-      await refresh();
+    } catch (err) {
+      setDeleteError(`Could not delete the review: ${err?.message ?? 'no response'}.`);
     } finally {
       setBusy(false);
     }
@@ -910,6 +946,11 @@ const App = () => {
           <Text>Your free trial runs until {trialEnds}.</Text>
         </SectionMessage>
       )}
+      {deleteError && (
+        <SectionMessage appearance="warning">
+          <Text>{deleteError}</Text>
+        </SectionMessage>
+      )}
       <Tabs id="access-review-tabs">
         <TabList>
           <Tab>Review</Tab>
@@ -925,7 +966,6 @@ const App = () => {
               review={data?.review ?? null}
               rows={rows}
               setRows={setRows}
-              stats={data?.stats}
               reload={reload}
               loading={loading}
               loadError={loadError}

@@ -51,7 +51,7 @@ Free ≤10; 1–100 $1.00; 101–250 $0.60; 251–1000 $0.35; 1001–2500 $0.25;
 | `read:group:jira` | Every group on the site and its members. |
 | `read:user:jira` | Active flag and account type, to leave out bots and customers; display name and email at display time. |
 | `read:avatar:jira` | Required alongside `read:user:jira` by the group-member endpoint; avatars are not shown. |
-| `read:jira-user` | Fall back to the site directory if application roles are unreadable. |
+| `read:jira-user` | Confirms that the person using the app is a Jira administrator (`/mypermissions`, as that user) before any request is served. |
 | `read:jira-work` | Search recently updated issues and read changelog, comment and worklog authors to decide who was active. Issue content is never stored. |
 | `storage:app` | Snapshots, decisions and notes in Forge hosted storage. |
 

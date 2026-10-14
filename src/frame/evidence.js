@@ -20,7 +20,7 @@ export function sheetsOf(review, rows, stats) {
     ['Signed off by', review.completedByName ?? ''],
     ['Activity window (days)', review.days ?? ''],
     ['Users reviewed', review.counts?.users ?? rows.length],
-    ['Admins', review.counts?.admins ?? ''],
+    ['In admin groups', review.counts?.admins ?? ''],
     ['Users with no activity in the window', review.counts?.inactive ?? ''],
     ['Users with no product access', review.counts?.noAccess ?? ''],
     ['Decisions: keep', stats?.keep ?? ''],
@@ -35,7 +35,7 @@ export function sheetsOf(review, rows, stats) {
     ['Warnings', (review.warnings ?? []).join(' ')],
   ];
   const users = [
-    ['Display name', 'Email', 'Account ID', 'Products', 'Groups', 'Admin', 'Activity', 'Decision', 'Note', 'Decided by', 'Decided at (UTC)', 'New since previous review'],
+    ['Display name', 'Email', 'Account ID', 'Products', 'Groups', 'In an admin group (by name)', 'Activity', 'Decision', 'Note', 'Decided by', 'Decided at (UTC)', 'New since previous review'],
     ...rows.map((r) => [
       r.displayName,
       r.email ?? '',
@@ -52,7 +52,7 @@ export function sheetsOf(review, rows, stats) {
     ]),
   ];
   const groups = [
-    ['Group', 'Grants', 'Admin group', 'Members (all accounts)', 'Members in this review', 'Empty'],
+    ['Group', 'Grants', 'Admin group (by name)', 'Members (all accounts)', 'Members in this review', 'Empty'],
     ...(review.groups ?? []).map((g) => [
       g.name,
       (g.products ?? []).join(' / ') || '',

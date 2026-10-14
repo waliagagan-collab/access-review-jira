@@ -8,18 +8,22 @@ import {
 } from './lib/jira.js';
 import {
   SHARDS,
+  GROUP_PAGE,
+  chunk,
   getScanState,
   setScanState,
   upsertUsers,
   markActive,
   getShardUsers,
   getShardActive,
+  getGroupPage,
+  setGroupPage,
   clearRun,
   saveReview,
   listReviews,
   getReviewRows,
 } from './lib/store.js';
-import { isAdminGroupName, buildRow, sortRows, groupSummary, diffReviews } from './lib/review.js';
+import { isAdminGroupName, buildRow, sortRows, groupSummary, diffReviews, flagChanges } from './lib/review.js';
 
 const queue = new Queue({ key: 'scan-queue' });
 
@@ -31,8 +35,12 @@ const queue = new Queue({ key: 'scan-queue' });
  *
  * Each invocation does a bounded slice, commits its cursor, and re-queues
  * itself. Work inside a slice is accumulated in memory and written to storage
- * ONCE at the end. If a slice dies mid-way, the next event resumes from the
- * last committed cursor; every write is idempotent, so replaying is safe.
+ * at the end. If a slice dies mid-way, the next event resumes from the last
+ * committed cursor; every write is idempotent, so replaying is safe.
+ *
+ * The scan record itself stays small: groups go to storage in pages of their
+ * own, users and activity into shards, so a site with thousands of groups and
+ * users never pushes one stored value past the size limit.
  */
 const SLICE = {
   groupPages: 20,
@@ -52,6 +60,7 @@ export const NO_ROLES_WARNING =
 
 const now = () => Date.now();
 const overBudget = (t0) => now() - t0 > SLICE.softBudgetMs;
+const START_CURSOR = { page: 0, index: 0, startAt: 0, count: 0 };
 
 // @forge/events v2+ invokes a consumer function directly with an AsyncEvent;
 // the pushed payload is on `event.body`. Resolvers are not used here.
@@ -61,34 +70,34 @@ export async function handler(event) {
   if (!state || state.status !== 'running' || state.run !== body.run) {
     return; // superseded or cancelled: drop the event, do not re-queue
   }
+  // Events are delivered at least once. Every commit bumps `seq` and sends it
+  // with the next event, so a duplicate or late copy is dropped instead of
+  // running the slice twice and forking the scan.
+  if ((body.seq ?? 0) !== (state.seq ?? 0)) return;
 
   try {
-    let live;
     switch (state.phase) {
       case 'roles':
-        live = await doRoles(state);
+        await doRoles(state);
         break;
       case 'groups':
-        live = await doGroups(state);
+        await doGroups(state);
         break;
       case 'members':
-        live = await doMembers(state);
+        await doMembers(state);
         break;
       case 'issues':
-        live = await doIssues(state);
+        await doIssues(state);
         break;
       case 'verify':
-        live = await doVerify(state);
+        await doVerify(state);
         break;
       case 'finalize':
-        live = await doFinalize(state);
+        await doFinalize(state);
         break;
       default:
         return await fail(state, `Unknown scan phase "${state.phase}"`);
     }
-    // A cancel or a new scan landed while this slice ran: its scratch writes
-    // would otherwise sit in storage for ever.
-    if (live === false) await clearRun(state.run);
     return undefined;
   } catch (err) {
     if (err.rateLimited) {
@@ -114,15 +123,32 @@ export async function handler(event) {
 /**
  * Commit a patch only if this run is still the live one. A cancel that lands
  * mid-slice must win; without this check the slice would overwrite it with
- * its stale `status: 'running'` snapshot and carry on.
+ * its stale `status: 'running'` snapshot and carry on. A superseded slice's
+ * scratch writes belong to a run nobody will finish, so they are cleared.
  */
 async function commit(state, patch, { requeue = true } = {}) {
   const fresh = await getScanState();
-  if (!fresh || fresh.run !== state.run || fresh.status !== 'running') return false;
-  const next = { ...fresh, ...patch };
+  if (!fresh || fresh.run !== state.run || fresh.status !== 'running') {
+    await clearRun(state.run, Math.max(state.groupPages ?? 0, patch.groupPages ?? 0));
+    return false;
+  }
+  // The seq only moves when a new event is sent; a pause (rate limit) keeps
+  // it, so the platform's retry of the same event is still accepted.
+  const seq = requeue ? (fresh.seq ?? 0) + 1 : (fresh.seq ?? 0);
+  const next = { ...fresh, ...patch, seq };
   await setScanState(next);
-  if (requeue) await queue.push({ body: { run: state.run } });
+  if (requeue) await queue.push({ body: { run: state.run, seq } });
   return true;
+}
+
+/**
+ * A rate limit mid-slice: save what the slice collected so far, commit the
+ * cursor without re-queueing, then rethrow so the handler asks the platform
+ * to retry after Retry-After. The retry resumes from the committed cursor.
+ */
+async function pause(state, patch, err) {
+  await commit(state, patch, { requeue: false });
+  throw err;
 }
 
 async function fail(state, error) {
@@ -135,7 +161,7 @@ async function fail(state, error) {
     finishedAt: new Date().toISOString(),
   });
   // Scratch data from a failed run has no further use; do not leave it behind.
-  await clearRun(state.run);
+  await clearRun(state.run, fresh.groupPages ?? 0);
 }
 
 // --- roles: which groups grant which product -------------------------------
@@ -160,8 +186,9 @@ async function doRoles(state) {
     warnings,
     products: roles.map(({ groups, ...r }) => r),
     grants,
-    groupsAll: {},
     groupCursor: 0,
+    groupPages: 0,
+    groupCount: 0,
   });
 }
 
@@ -169,18 +196,30 @@ async function doRoles(state) {
 
 async function doGroups(state) {
   const t0 = now();
-  const groupsAll = { ...(state.groupsAll ?? {}) };
   let startAt = state.groupCursor ?? 0;
+  let pages = state.groupPages ?? 0;
+  const collected = [];
   let isLast = false;
+  let paused = null;
   for (let i = 0; i < SLICE.groupPages && !overBudget(t0); i++) {
-    const page = await fetchGroupListPage(startAt);
+    let page;
+    try {
+      page = await fetchGroupListPage(startAt);
+    } catch (err) {
+      if (err.rateLimited) {
+        paused = err;
+        break;
+      }
+      throw err;
+    }
     for (const g of page.groups) {
-      groupsAll[g.groupId] = {
+      collected.push({
+        groupId: g.groupId,
         name: g.name,
         products: state.grants?.[g.groupId] ?? [],
         admin: isAdminGroupName(g.name),
         members: 0,
-      };
+      });
     }
     startAt = page.nextStartAt;
     if (page.isLast) {
@@ -188,45 +227,91 @@ async function doGroups(state) {
       break;
     }
   }
-  const groupQueue = isLast ? Object.entries(groupsAll).map(([groupId, g]) => ({ groupId, name: g.name, startAt: 0 })) : state.groupQueue;
-  return commit(state, {
-    groupsAll,
+  // Groups go to storage in pages of their own; a few thousand of them would
+  // not fit in the scan record. A replayed slice rewrites the same pages.
+  for (const page of chunk(collected, GROUP_PAGE)) {
+    await setGroupPage(state.run, pages, page);
+    pages += 1;
+  }
+  const patch = {
     groupCursor: startAt,
+    groupPages: pages,
+    groupCount: (state.groupCount ?? 0) + collected.length,
     phase: isLast ? 'members' : 'groups',
-    ...(isLast ? { groupQueue, usersFound: 0 } : {}),
-  });
+    ...(isLast ? { memberCursor: START_CURSOR, usersFound: 0 } : {}),
+  };
+  if (paused) return pause(state, patch, paused);
+  return commit(state, patch);
 }
 
 // --- members: who is in each group -----------------------------------------
 
+/**
+ * Walks the stored group pages in order. The cursor names the page, the
+ * group within it, the member page to ask for next, and the member count so
+ * far for that group; when a group's last member page lands, its count is
+ * written into the group page.
+ */
 async function doMembers(state) {
   const t0 = now();
-  const groupQueue = [...(state.groupQueue ?? [])];
-  const groupsAll = { ...(state.groupsAll ?? {}) };
+  const cursor = { ...START_CURSOR, ...(state.memberCursor ?? {}) };
+  const totalPages = state.groupPages ?? 0;
+  const pages = new Map(); // page index -> groups, loaded as the cursor reaches them
+  const touched = new Set();
   const collected = [];
+  let calls = 0;
+  let paused = null;
 
-  for (let i = 0; i < SLICE.memberPages && groupQueue.length && !overBudget(t0); i++) {
-    const head = groupQueue[0];
-    const page = await fetchGroupMemberPage(head.groupId, head.startAt);
-    const meta = groupsAll[head.groupId] ?? { name: head.name, products: [], admin: isAdminGroupName(head.name), members: 0 };
-    groupsAll[head.groupId] = { ...meta, members: (meta.members ?? 0) + page.rawCount };
-    for (const u of page.users) {
-      collected.push({ ...u, products: meta.products ?? [], groups: [head.groupId] });
+  while (calls < SLICE.memberPages && cursor.page < totalPages && !overBudget(t0)) {
+    if (!pages.has(cursor.page)) pages.set(cursor.page, await getGroupPage(state.run, cursor.page));
+    const page = pages.get(cursor.page);
+    if (cursor.index >= page.length) {
+      cursor.page += 1;
+      cursor.index = 0;
+      cursor.startAt = 0;
+      cursor.count = 0;
+      continue;
     }
-    if (page.isLast) groupQueue.shift();
-    else groupQueue[0] = { ...head, startAt: page.nextStartAt };
+    const g = page[cursor.index];
+    let res;
+    try {
+      res = await fetchGroupMemberPage(g.groupId, cursor.startAt);
+    } catch (err) {
+      if (err.rateLimited) {
+        paused = err;
+        break;
+      }
+      if (err.status === 404) res = { users: [], rawCount: 0, isLast: true }; // deleted since it was listed
+      else throw err;
+    }
+    calls += 1;
+    for (const u of res.users) {
+      collected.push({ ...u, products: g.products ?? [], groups: [g.groupId] });
+    }
+    cursor.count += res.rawCount;
+    if (res.isLast) {
+      page[cursor.index] = { ...g, members: cursor.count };
+      touched.add(cursor.page);
+      cursor.index += 1;
+      cursor.startAt = 0;
+      cursor.count = 0;
+    } else {
+      cursor.startAt = res.nextStartAt;
+    }
   }
 
+  for (const i of touched) await setGroupPage(state.run, i, pages.get(i));
   if (collected.length) await upsertUsers(state.run, collected);
 
-  const done = groupQueue.length === 0;
-  return commit(state, {
-    groupQueue,
-    groupsAll,
+  const done = cursor.page >= totalPages && !paused;
+  const patch = {
+    memberCursor: cursor,
     usersFound: (state.usersFound ?? 0) + collected.length,
     phase: done ? 'issues' : 'members',
     ...(done ? { issueToken: null, issuePages: 0, issuesScanned: 0 } : {}),
-  });
+  };
+  if (paused) return pause(state, patch, paused);
+  return commit(state, patch);
 }
 
 // --- issues (sweep) ---------------------------------------------------------
@@ -238,10 +323,20 @@ async function doIssues(state) {
   let scanned = state.issuesScanned ?? 0;
   let done = false;
   let truncated = false;
+  let paused = null;
   const latest = {};
 
   for (let i = 0; i < SLICE.issuePages && !overBudget(t0); i++) {
-    const page = await fetchActivityPage(state.days, token, ISSUE_PAGE);
+    let page;
+    try {
+      page = await fetchActivityPage(state.days, token, ISSUE_PAGE);
+    } catch (err) {
+      if (err.rateLimited) {
+        paused = err;
+        break;
+      }
+      throw err;
+    }
     for (const [id, a] of Object.entries(page.activity)) {
       if (!latest[id] || Date.parse(a.at) > Date.parse(latest[id])) latest[id] = a.at;
     }
@@ -262,23 +357,26 @@ async function doIssues(state) {
 
   if (Object.keys(latest).length) await markActive(state.run, latest);
 
-  return commit(state, {
+  const patch = {
     issueToken: token,
     issuePages: pages,
     issuesScanned: scanned,
     sweepTruncated: Boolean(state.sweepTruncated) || truncated,
     phase: done ? 'verify' : 'issues',
     ...(done ? { verifyShard: 0, verifyIndex: 0, verified: 0, inactiveFound: 0 } : {}),
-  });
+  };
+  if (paused) return pause(state, patch, paused);
+  return commit(state, patch);
 }
 
 // --- verify -----------------------------------------------------------------
 
 /**
  * For every user the sweep could not vouch for, ask Jira directly. This is
- * exhaustive across all issues, so it is correct even when the sweep was
- * truncated. Results are kept in the active map: a verified-active user gets
- * `true`, an inactive one gets their band, so finalize needs no extra lookups.
+ * exhaustive across all issues the app can see, so it is correct even when
+ * the sweep was truncated. Results are kept in the active map: a
+ * verified-active user gets `true`, an inactive one gets their band, so
+ * finalize needs no extra lookups.
  */
 async function doVerify(state) {
   const t0 = now();
@@ -287,8 +385,9 @@ async function doVerify(state) {
   let verified = state.verified ?? 0;
   let inactiveFound = state.inactiveFound ?? 0;
   let checked = 0;
+  let paused = null;
 
-  while (shard < SHARDS && checked < SLICE.verifyUsers && !overBudget(t0)) {
+  while (shard < SHARDS && checked < SLICE.verifyUsers && !overBudget(t0) && !paused) {
     const users = await getShardUsers(state.run, shard);
     const activeSet = await getShardActive(state.run, shard);
     const ids = Object.keys(users).sort();
@@ -296,10 +395,28 @@ async function doVerify(state) {
 
     while (index < ids.length && checked < SLICE.verifyUsers && !overBudget(t0)) {
       const accountId = ids[index];
-      index += 1;
-      if (activeSet[accountId]) continue; // sweep already proved them active
+      if (activeSet[accountId]) {
+        index += 1;
+        continue; // sweep already proved them active
+      }
 
-      const result = await verifyCandidate(accountId, state.days);
+      let result;
+      try {
+        result = await verifyCandidate(accountId, state.days);
+      } catch (err) {
+        if (err.rateLimited) {
+          paused = err; // this user is re-verified when the slice resumes
+          break;
+        }
+        if (err.status === 400) {
+          // Jira rejects the account (removed since the listing, or an unusual
+          // id). Treated as active: never listed as inactive on a guess.
+          result = { active: true };
+        } else {
+          throw err;
+        }
+      }
+      index += 1;
       checked += 1;
       verified += 1;
       if (result.active) results[accountId] = 'verified';
@@ -317,14 +434,16 @@ async function doVerify(state) {
     }
   }
 
-  const done = shard >= SHARDS;
-  return commit(state, {
+  const done = shard >= SHARDS && !paused;
+  const patch = {
     verifyShard: shard,
     verifyIndex: index,
     verified,
     inactiveFound,
     phase: done ? 'finalize' : 'verify',
-  });
+  };
+  if (paused) return pause(state, patch, paused);
+  return commit(state, patch);
 }
 
 /** Pure: an active-map value -> the activity facts for a row. */
@@ -341,20 +460,30 @@ export function activityOf(value) {
 // --- finalize ---------------------------------------------------------------
 
 async function doFinalize(state) {
-  const groupsAll = state.groupsAll ?? {};
-  const rows = [];
-  for (let s = 0; s < SHARDS; s++) {
-    const users = await getShardUsers(state.run, s);
-    const active = await getShardActive(state.run, s);
-    for (const [accountId, u] of Object.entries(users)) {
-      rows.push(buildRow(accountId, u, groupsAll, activityOf(active[accountId])));
+  const groupsAll = {};
+  for (let i = 0; i < (state.groupPages ?? 0); i++) {
+    for (const g of await getGroupPage(state.run, i)) {
+      groupsAll[g.groupId] = { name: g.name, products: g.products ?? [], admin: Boolean(g.admin), members: g.members ?? 0 };
     }
   }
-  const sorted = sortRows(rows);
 
-  // What changed since the last completed review.
+  const rows = [];
+  for (const batch of chunk(Array.from({ length: SHARDS }, (_, s) => s), 8)) {
+    const parts = await Promise.all(batch.map(async (s) => [await getShardUsers(state.run, s), await getShardActive(state.run, s)]));
+    for (const [users, active] of parts) {
+      for (const [accountId, u] of Object.entries(users)) {
+        rows.push(buildRow(accountId, u, groupsAll, activityOf(active[accountId])));
+      }
+    }
+  }
+
+  // What changed since the last completed review: each row carries its own
+  // flags, and the record keeps the counts and a capped list.
   const previous = (await listReviews()).find((m) => m.status === 'complete' && m.id !== state.run) ?? null;
-  const changes = previous ? diffReviews(sorted, await getReviewRows(previous.id)) : null;
+  const previousRows = previous ? await getReviewRows(previous.id) : null;
+  const sorted = previous ? flagChanges(sortRows(rows), previousRows) : sortRows(rows);
+  const changes = previous ? diffReviews(sorted, previousRows) : null;
+  const groups = groupSummary(groupsAll, sorted);
 
   const meta = {
     id: state.run,
@@ -370,7 +499,6 @@ async function doFinalize(state) {
       noAccess: sorted.filter((r) => !(r.products ?? []).length).length,
     },
     products: state.products ?? [],
-    groups: groupSummary(groupsAll, sorted),
     previousReviewId: previous?.id ?? null,
     previousCompletedAt: previous?.completedAt ?? null,
     changes,
@@ -379,8 +507,8 @@ async function doFinalize(state) {
     sweepTruncated: Boolean(state.sweepTruncated),
     warnings: [...(state.warnings ?? []), ...(state.sweepTruncated ? [SWEEP_TRUNCATED_WARNING] : [])],
   };
-  await saveReview(meta, sorted);
-  await clearRun(state.run);
+  await saveReview(meta, sorted, groups);
+  await clearRun(state.run, state.groupPages ?? 0);
 
   return commit(state, { status: 'complete', phase: 'done', finishedAt: meta.generatedAt, reviewId: meta.id }, { requeue: false });
 }

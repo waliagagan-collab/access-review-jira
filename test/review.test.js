@@ -12,7 +12,7 @@ import {
   decisionStats,
   filterReviewRows,
   quarterName,
-  activityText,
+  flagChanges,
   MAX_NOTE,
 } from '../src/lib/review.js';
 import { activityOf } from '../src/worker.js';
@@ -69,7 +69,33 @@ test('group summary counts members in the review and flags empty and admin group
   assert.equal(jsw.licensedMembers, 2);
   assert.equal(jsw.members, 3);
   assert.equal(g.find((x) => x.id === 'g-empty').empty, true);
-  assert.equal(isAdminGroupName('jira-admins-acme'), true);
+});
+
+test('admin groups are recognised by a whole word, not by any name containing "admin"', () => {
+  for (const name of ['jira-admins-acme', 'site-admins', 'org-admins', 'administrators', 'jira-administrators', 'sysadmin', 'Admin', 'ADMIN-team', 'confluence_admin']) {
+    assert.equal(isAdminGroupName(name), true, name);
+  }
+  for (const name of ['badminton-club', 'administrative-assistants', 'padmin', 'adminton', 'design-team', '', null]) {
+    assert.equal(isAdminGroupName(name), false, String(name));
+  }
+});
+
+test('rows carry their own new and became-admin flags, with no cap', () => {
+  const previous = [
+    { accountId: 'stays', admin: false },
+    { accountId: 'promoted', admin: false },
+  ];
+  const current = [
+    { accountId: 'stays', admin: false },
+    { accountId: 'promoted', admin: true },
+    { accountId: 'joined', admin: false },
+  ];
+  const flagged = flagChanges(current, previous);
+  assert.equal(flagged[0].newSinceLast, undefined);
+  assert.equal(flagged[0].becameAdmin, undefined);
+  assert.equal(flagged[1].becameAdmin, true);
+  assert.equal(flagged[2].newSinceLast, true);
+  assert.deepEqual(flagChanges(current, undefined).map((r) => r.newSinceLast), [true, true, true]);
 });
 
 test('the diff names who was added, who left, who became an admin and who gained products', () => {
@@ -119,12 +145,10 @@ test('decisions and notes from the page are normalised, never trusted', () => {
   assert.equal(normaliseNote('x'.repeat(MAX_NOTE + 50)).length, MAX_NOTE);
 });
 
-test('quarter names and activity words', () => {
+test('quarter names', () => {
   assert.equal(quarterName('2026-10-13T00:00:00Z'), 'Q4 2026');
   assert.equal(quarterName('2026-02-01T00:00:00Z'), 'Q1 2026');
   assert.equal(quarterName('not a date'), '');
-  assert.match(activityText({ active: true, lastActivityAt: '2026-10-01T10:00:00Z' }), /last seen 2026-10-01/);
-  assert.match(activityText({ active: false, label: 'Over a year, or never' }), /No activity · Over a year/);
 });
 
 test('the evidence workbook has summary, users and groups sheets and no live formulas', () => {
