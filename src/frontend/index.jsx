@@ -33,7 +33,7 @@ import { licenseGate, licenseMessage } from '../lib/scan.js';
 import { scanProgress, showReviewPrompt } from '../lib/ui.js';
 import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName } from '../lib/review.js';
 
-const REVIEW_URL = 'https://marketplace.atlassian.com/search?query=Access%20Review%20for%20Jira';
+const REVIEW_URL = 'https://marketplace.atlassian.com/apps/285025617?tab=reviews';
 
 const PERIODS = [30, 60, 90, 180, 365].map((d) => ({
   label: `Activity in the last ${d} days`,
