@@ -10,14 +10,21 @@
  */
 
 /**
- * Groups that confer administration, recognised by name: "admin", "admins",
- * "administrator(s)" or "sysadmin" as a whole word, so "site-admins" and
- * "jira-administrators" count but "badminton-club" and
- * "administrative-assistants" do not. Jira Cloud has no API that says which
- * groups hold global permissions, so this is a name rule, and the page and
- * the evidence file label it as one.
+ * Groups that confer administration, recognised by name. The name is split
+ * into words on anything that is not a letter and on a change from lower to
+ * upper case, and a word that is or ends with "admin", "admins",
+ * "administrator(s)", "administratoren" or "sysadmin(s)" counts. So
+ * "site-admins", "jira-administrators", "JiraAdmins" and "itadmins" count,
+ * and "badminton-club" and "administrative-assistants" do not. Jira Cloud has
+ * no API that says which groups hold global permissions, so this is a name
+ * rule, and the page and the evidence file label it as one.
  */
-export const isAdminGroupName = (name) => /(^|[^a-z])(sys)?admin(s|istrator|istrators)?($|[^a-z])/i.test(String(name ?? ''));
+const ADMIN_WORDS = ['admin', 'admins', 'administrator', 'administrators', 'administratoren'];
+export const isAdminGroupName = (name) =>
+  String(name ?? '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z]+/)
+    .some((word) => ADMIN_WORDS.some((w) => word.toLowerCase().endsWith(w)));
 
 export const DECISIONS = ['keep', 'remove', 'flag'];
 export const DECISION_WORDS = { keep: 'Keep', remove: 'Remove', flag: 'Follow up' };
@@ -28,10 +35,12 @@ export const normaliseDecision = (d) => (DECISIONS.includes(String(d)) ? String(
 export const MAX_NOTE = 500;
 export const normaliseNote = (n) => String(n ?? '').trim().slice(0, MAX_NOTE);
 
+export const NOT_CHECKED = 'Not checked';
+
 /**
  * Pure: a user record from the scan -> a review row.
  *   groupsAll  - { groupId -> { name, products, admin } } for every group on the site
- *   activity   - { active: boolean, at?: ISO string, bucket?, label?, severity? }
+ *   activity   - { active: boolean, at?: ISO string, bucket?, label?, severity?, unchecked? }
  */
 export function buildRow(accountId, user, groupsAll, activity) {
   const groups = [...new Set(user?.groups ?? [])].filter((id) => groupsAll?.[id]);
@@ -43,6 +52,11 @@ export function buildRow(accountId, user, groupsAll, activity) {
     row.bucket = activity?.bucket ?? null;
     row.label = activity?.label ?? null;
     row.severity = activity?.severity ?? 0;
+  }
+  // Jira rejected this person's activity query: neither active nor inactive.
+  if (activity?.unchecked) {
+    row.unchecked = true;
+    row.label = NOT_CHECKED;
   }
   return row;
 }
@@ -75,15 +89,20 @@ export function groupSummary(groupsAll, rows) {
 
 /**
  * Pure: mark each current row with what changed for that person since the
- * previous review. Rows carry their own flags, so there is no cap.
+ * previous review. Rows carry their own flags, so there is no cap. Someone
+ * who sits in an admin group now and was absent or not an admin before is a
+ * new admin, whether or not the account itself is new.
  */
 export function flagChanges(current, previous) {
   const prev = new Map((previous ?? []).map((r) => [r.accountId, r]));
   return (current ?? []).map((r) => {
     const p = prev.get(r.accountId);
-    if (!p) return { ...r, newSinceLast: true };
-    if (r.admin && !p.admin) return { ...r, becameAdmin: true };
-    return r;
+    const flags = {};
+    if (!p) flags.newSinceLast = true;
+    if (r.admin && !p?.admin) flags.becameAdmin = true;
+    const gained = p ? (r.products ?? []).filter((x) => !(p.products ?? []).includes(x)) : [];
+    if (gained.length) flags.gainedProducts = gained;
+    return Object.keys(flags).length ? { ...r, ...flags } : r;
   });
 }
 
@@ -103,11 +122,11 @@ export function diffReviews(current, previous) {
   const gainedProducts = [];
   for (const [id, r] of cur) {
     const p = prev.get(id);
+    if (r.admin && !p?.admin) becameAdmin.push(id);
     if (!p) {
       added.push(id);
       continue;
     }
-    if (r.admin && !p.admin) becameAdmin.push(id);
     const gained = (r.products ?? []).filter((x) => !(p.products ?? []).includes(x));
     if (gained.length) gainedProducts.push({ accountId: id, products: gained });
   }
@@ -142,7 +161,7 @@ const norm = (s) => String(s ?? '').toLowerCase();
  *   product   - product name, or 'none' for users with no product access
  *   group     - group id
  *   adminOnly - admins only
- *   activity  - 'active' | 'inactive'
+ *   activity  - 'active' | 'inactive' | 'unchecked' (Jira rejected the activity query)
  *   decision  - 'keep' | 'remove' | 'flag' | 'undecided'
  *   newOnly   - only users not in the previous review
  */
@@ -154,7 +173,7 @@ export function filterReviewRows(rows, { query = '', product = null, group = nul
       (!product || (product === 'none' ? !(r.products ?? []).length : (r.products ?? []).includes(product))) &&
       (!group || (r.groups ?? []).includes(group)) &&
       (!adminOnly || r.admin) &&
-      (!activity || (activity === 'active' ? r.active : !r.active)) &&
+      (!activity || (activity === 'active' ? r.active : activity === 'unchecked' ? Boolean(r.unchecked) : !r.active && !r.unchecked)) &&
       (!decision || (decision === 'undecided' ? !r.decision : r.decision === decision)) &&
       (!newOnly || r.newSinceLast)
   );
@@ -166,3 +185,41 @@ export function quarterName(iso) {
   if (Number.isNaN(d.getTime())) return '';
   return `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}`;
 }
+
+/**
+ * Pure: the earlier sign-offs of a review, oldest first. Each entry says who
+ * signed off, when, with which totals, and who reopened it and when. A review
+ * reopened before this history was kept still has that one sign-off in its
+ * live fields; it is read from there.
+ */
+export function signoffHistory(meta) {
+  if (Array.isArray(meta?.signoffs)) return meta.signoffs;
+  if (meta?.status !== 'complete' && meta?.completedAt) {
+    return [
+      {
+        completedAt: meta.completedAt,
+        completedBy: meta.completedBy ?? null,
+        stats: meta.stats ?? null,
+        reopenedAt: meta.reopenedAt ?? null,
+        reopenedBy: meta.reopenedBy ?? null,
+      },
+    ];
+  }
+  return [];
+}
+
+/**
+ * Pure: a review record as the page and the evidence file should see it. The
+ * sign-off fields are filled only while the review is signed off; earlier
+ * sign-offs are in `signoffs`.
+ */
+export function withSignoffs(meta) {
+  if (!meta) return meta;
+  const signoffs = signoffHistory(meta);
+  return meta.status === 'complete'
+    ? { ...meta, signoffs }
+    : { ...meta, signoffs, completedAt: null, completedBy: null, stats: null };
+}
+
+/** Pure: which rows "Keep all active non-admins" marks. Rows that were not checked are never among them. */
+export const isActiveNonAdmin = (r) => Boolean(r?.active) && !r?.admin && !r?.unchecked;

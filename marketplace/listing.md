@@ -10,7 +10,7 @@ Review who has access to Jira every quarter, with activity evidence, sign-off an
 
 ## Summary (≤ 250)
 
-A snapshot of every user, group and product on your site, with who did anything in Jira recently. Mark each person Keep, Remove or Follow up, sign the review off, and download the evidence for SOC 2 or ISO 27001. Read-only.
+A snapshot of every user, group and Jira product on your site, with who did anything in Jira recently. Mark each person Keep, Remove or Follow up, sign the review off, and download the evidence for SOC 2 or ISO 27001. Read-only.
 
 ## Categories and keywords
 
@@ -23,11 +23,11 @@ A snapshot of every user, group and product on your site, with who did anything 
 
 Access Review answers it in one place.
 
-- **Snapshot.** Every group on the site, including empty ones; who is in each; which product each group grants; who holds an admin group; and whether each person created, changed, commented on or logged work on anything in Jira in the window you choose. Every candidate is checked against all issues, not a sample.
+- **Snapshot.** Every group on the site, including empty ones; who is in each; which Jira product each group grants; who holds an admin group; and whether each person created, changed, commented on or logged work on anything in Jira in the window you choose. Every candidate is checked against all issues the app can see, not a sample.
 - **Review.** Mark each person Keep, Remove or Follow up, with notes. Filter by product, group, admins, activity, decision, or "new since the previous review".
-- **Sign-off.** Complete the review with your name and the time. Reopen it if needed.
-- **Evidence.** Excel (Summary, Users, Groups) or CSV, with every decision, reviewer and timestamp.
-- **Change tracking.** The next review shows who was added, who left, who became an admin and who gained a product.
+- **Sign-off.** Complete the review with your name and the time. Reopen it if needed; the earlier sign-off and who reopened it stay on record.
+- **Evidence.** Excel (Summary, Users, Groups, Changes) or CSV, with every decision, reviewer and timestamp.
+- **Change tracking.** The next review counts who was added, who left, who joined an admin group and who gained a Jira product, and the evidence file names them.
 
 **Read-only.** No write permission exists, so the app cannot change anything. To act on the Remove list, use Atlassian Administration, or Seat Reclaim for Jira, which removes access with an undo. **Runs on Atlassian;** no servers of ours.
 
@@ -35,9 +35,9 @@ Access Review answers it in one place.
 
 Images in `assets/2026-10-13/` (1840x900): highlight-1-review, highlight-2-groups, highlight-3-signed-off. Logo and banner in `assets/`.
 
-1. **Every user, every group, one review** — The snapshot lists everyone in every group with the products their groups grant, who holds an admin group, and their last activity. Mark each person Keep, Remove or Follow up, with a note.
-2. **Groups, with what they grant** — Every group on the site at snapshot time, the products it grants, how many members it has, and which groups are empty. Admin groups are marked.
-3. **Sign off, then hand over the evidence** — Signing off records who approved the review and when, and locks it. Download an Excel workbook (Summary, Users, Groups) for your auditor. The last 12 reviews stay available.
+1. **Every user, every group, one review** — The snapshot lists everyone in every group with the Jira products their groups grant, who holds an admin group, and their last activity. Mark each person Keep, Remove or Follow up, with a note.
+2. **Groups, with what they grant** — Every group on the site at snapshot time, the Jira products it grants, how many members it has, and which groups are empty. Admin groups are marked.
+3. **Sign off, then hand over the evidence** — Signing off records who approved the review and when, and locks it. Download an Excel workbook (Summary, Users, Groups, Changes) for your auditor. 12 reviews are kept; a signed-off one goes only when you delete it.
 
 ## Pricing (per user per month, graduated)
 
@@ -47,7 +47,7 @@ Free ≤10; 1–100 $1.00; 101–250 $0.60; 251–1000 $0.35; 1001–2500 $0.25;
 
 | Scope | Why |
 | --- | --- |
-| `read:application-role:jira` | Which groups grant which product, and Atlassian's own seat counts. |
+| `read:application-role:jira` | Which groups grant which Jira product, and Atlassian's own seat counts. |
 | `read:group:jira` | Every group on the site and its members. |
 | `read:user:jira` | Active flag and account type, to leave out bots and customers; display name and email at display time. |
 | `read:avatar:jira` | Required alongside `read:user:jira` by the group-member endpoint; avatars are not shown. |

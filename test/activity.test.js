@@ -74,6 +74,18 @@ test('creator and reporter are stamped at created, never at updated', () => {
   assert.equal(activity.old.at, '2024-01-01T00:00:00.000+0000');
 });
 
+test('being named reporter by someone else is NOT activity', () => {
+  // An agent or an automation rule raised the issue and put a colleague in as reporter.
+  const activity = reduceIssues([
+    { fields: { created: '2026-09-01T10:00:00.000+0000', creator: person('agent'), reporter: person('named') } },
+    { fields: { created: '2026-09-02T10:00:00.000+0000', reporter: person('named') } },
+  ]);
+  assert.equal(activity.named, undefined);
+  assert.equal(activity.agent.via, 'created an issue');
+  // Someone who raised their own issue is still seen.
+  assert.ok(reduceIssues([{ fields: { created: '2026-09-01T10:00:00.000+0000', creator: person('self'), reporter: person('self') } }]).self);
+});
+
 test('keeps the latest timestamp across mixed UTC offsets', () => {
   // 09:00+0530 is 03:30Z — EARLIER than 05:00Z, but sorts LATER as a string.
   const activity = reduceIssues([
@@ -204,6 +216,23 @@ test('per-user JQL quotes the account id and only lists things the user DID', ()
   assert.ok(jql.includes('creator ='));
   assert.ok(!/assignee = /.test(jql), 'assignee equality is not a signal');
   assert.ok(jql.includes('startOfDay(-90d)'));
+});
+
+test('per-user JQL covers comments and every field edit through updatedBy(), and not being named reporter', () => {
+  const jql = buildUserActivityJql('557058:abc-def', 90);
+  assert.ok(jql.includes('(issue in updatedBy("557058:abc-def", "-90d"))'));
+  assert.ok(!/reporter = /.test(jql), 'being named reporter is done TO the user');
+  assert.ok(jql.includes('reporter CHANGED BY'), 'changing the reporter is something the user did');
+  assert.ok(buildUserActivityJql('x', 365).includes('updatedBy("x", "-365d")'));
+});
+
+test('the work-log clauses can be left out, for sites where Jira rejects them', () => {
+  const jql = buildUserActivityJql('557058:abc-def', 90, { worklog: false });
+  assert.ok(!jql.includes('worklogAuthor'));
+  assert.ok(!jql.includes('worklogDate'));
+  assert.ok(jql.includes('updatedBy('));
+  assert.ok(jql.includes('creator ='));
+  assert.ok(jql.includes('status CHANGED BY'));
 });
 
 // --- dormancy bands -----------------------------------------------------------

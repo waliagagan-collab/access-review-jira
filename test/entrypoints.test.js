@@ -52,3 +52,31 @@ test('table cell keys are prefixed strings, so two cells in a row can never shar
   assert.ok(!/key:\s*[^,`'"\n]*\?\s*1\s*:\s*0\s*,/.test(ui), 'no bare 1/0 cell keys');
   assert.ok(!/key:\s*(r\.severity|g\.members|g\.licensedMembers|r\.counts)[^,`]*,/.test(ui), 'no bare numeric cell keys');
 });
+
+test('the page sends decisions one at a time and lets the server pick and count', () => {
+  const ui = read('../src/frontend/index.jsx');
+  assert.ok(ui.includes('sending.current = sending.current.then(send, send)'), 'decisions are queued');
+  assert.ok(ui.includes("invoke('setDecisionsBulk', { reviewId: review.id, decision: 'keep' })"), 'bulk keep sends no account list');
+  assert.ok(ui.includes('expectedUndecided: liveStats.undecided'), 'sign-off sends the count the admin saw');
+  assert.ok(/onClick=\{\(\) => setConfirmOpen\(true\)\} isDisabled=\{busy \|\| loading \|\|/.test(ui), 'no sign-off while rows are loading');
+  assert.ok(ui.includes("invoke('cancelScan')"), 'a running snapshot can be cancelled');
+  assert.ok(ui.includes('setStatusError(true)') && ui.includes('Could not load your reviews'), 'a failed status call is shown, not hidden');
+});
+
+test('the page and the evidence frame use the same event names and the same date helpers', () => {
+  const ui = read('../src/frontend/index.jsx');
+  const frame = read('../src/frame/index.js');
+  const evidence = read('../src/frame/evidence.js');
+  assert.ok(ui.includes('events.emit(OPEN_REVIEW_EVENT'));
+  assert.ok(ui.includes('events.on(FRAME_READY_EVENT'));
+  assert.ok(frame.includes('events.on(OPEN_REVIEW_EVENT'));
+  assert.ok(frame.includes('events.emit(FRAME_READY_EVENT'));
+  assert.ok(ui.includes('utcDay(iso)') && evidence.includes('export const day = utcDay'));
+});
+
+test('the queue consumer has room for long slices', () => {
+  const manifest = read('../manifest.yml');
+  assert.match(manifest, /timeoutSeconds: 300/);
+  const worker = read('../src/worker.js');
+  assert.match(worker, /softBudgetMs: 240_000/);
+});

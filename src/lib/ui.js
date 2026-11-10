@@ -40,3 +40,26 @@ export function scanProgress(state) {
  * prompt is seen once, not once per admin.
  */
 export const showReviewPrompt = ({ earned, hidden }) => Boolean(earned) && !hidden;
+
+/**
+ * Pure: the UTC day of a timestamp ("2026-10-13"), or '' when there is none.
+ * The page and the evidence file both use this, so a time that Jira returned
+ * with another offset shows the same day in both.
+ */
+export const utcDay = (iso) => {
+  const t = Date.parse(iso ?? '');
+  return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(0, 10);
+};
+
+/** Pure: "2026-10-13 02:40 UTC", or '' when there is none. */
+export const utcStamp = (iso) => {
+  const t = Date.parse(iso ?? '');
+  return Number.isNaN(t) ? '' : `${new Date(t).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+};
+
+/**
+ * Events between the page and the evidence frame. The page says which review
+ * is open; the frame asks once it has loaded, because it loads after the page.
+ */
+export const OPEN_REVIEW_EVENT = 'accessReviewOpen';
+export const FRAME_READY_EVENT = 'accessReviewFrameReady';

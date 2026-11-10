@@ -28,10 +28,10 @@ import ForgeReconciler, {
   Text,
   Textfield,
 } from '@forge/react';
-import { invoke, view } from '@forge/bridge';
+import { invoke, view, events } from '@forge/bridge';
 import { licenseGate, licenseMessage } from '../lib/scan.js';
-import { scanProgress, showReviewPrompt } from '../lib/ui.js';
-import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName } from '../lib/review.js';
+import { scanProgress, showReviewPrompt, utcDay, utcStamp, OPEN_REVIEW_EVENT, FRAME_READY_EVENT } from '../lib/ui.js';
+import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName, isActiveNonAdmin } from '../lib/review.js';
 
 const REVIEW_URL = 'https://marketplace.atlassian.com/apps/285025617?tab=reviews';
 
@@ -40,14 +40,16 @@ const PERIODS = [30, 60, 90, 180, 365].map((d) => ({
   value: String(d),
 }));
 
-const fmtDate = (iso) => (iso ? new Date(iso).toISOString().slice(0, 10) : '—');
-const fmtTime = (iso) => (iso ? new Date(iso).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '—');
+// Dates and times are UTC, from the same helpers the evidence file uses.
+const fmtDate = (iso) => utcDay(iso) || '—';
+const fmtTime = (iso) => utcStamp(iso) || '—';
+const totalsText = (s) => (s ? `${s.keep ?? 0} keep, ${s.remove ?? 0} remove, ${s.flag ?? 0} follow up, ${s.undecided ?? 0} undecided` : 'totals not recorded');
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 const phaseText = (s) => {
   switch (s?.phase) {
     case 'roles':
-      return 'Reading which groups grant which product';
+      return 'Reading which groups grant which Jira product';
     case 'groups':
       return `Listing groups — ${s.groupCount ?? 0} so far`;
     case 'members':
@@ -93,7 +95,7 @@ const HowItWorks = ({ compact, onToggle }) =>
     <SectionMessage>
       <Inline space="space.100" alignBlock="center" shouldWrap>
         <Text>
-          A snapshot of every user, their groups, products, admin rights and recent activity. Mark each person Keep,
+          A snapshot of every user, their groups, Jira products, admin groups and recent activity. Mark each person Keep,
           Remove or Follow up, sign the review off, and download the evidence. Read-only: nothing on your site changes.
         </Text>
         <Button appearance="subtle" spacing="compact" onClick={onToggle}>
@@ -106,16 +108,17 @@ const HowItWorks = ({ compact, onToggle }) =>
       <Stack space="space.100">
         <Text>
           <Strong>Start a review</Strong> and the app takes a snapshot of the site: every group (including empty ones),
-          who is in it, which product each group grants, who holds an admin group, and whether each person did
-          anything in Jira in the window: created or reported an issue, changed a status or field, commented or
-          logged work. Every candidate is checked against all issues the app can see, not a sample. Admin groups are
-          recognised by name.
+          who is in it, which Jira product each group grants, who holds an admin group, and whether each person did
+          anything in Jira in the window: created an issue, changed a status or field, commented or logged work.
+          Every candidate is checked against all issues the app can see, not a sample. Admin groups are recognised
+          by name. Products other than Jira are not read, so a group that only grants Confluence shows no product.
         </Text>
         <Text>
           Then review: mark each person <Strong>Keep</Strong>, <Strong>Remove</Strong> or <Strong>Follow up</Strong>,
           add notes, and <Strong>Complete review</Strong> to sign it off with your name and the time. Download the
-          evidence as Excel (summary, users and groups) for your SOC 2 or ISO 27001 file. The next review shows who
-          was added, who left and who became an admin since this one.
+          evidence as Excel (summary, users, groups and changes) for your SOC 2 or ISO 27001 file. The next review
+          counts who was added, who left and who joined an admin group since this one, and its evidence file names
+          them.
         </Text>
         <Text>
           The app never changes anything. To act on the Remove list, use Atlassian Administration, or Seat Reclaim for
@@ -142,6 +145,7 @@ const VIEWS = [
   { label: 'In admin groups', value: 'admins' },
   { label: 'Active in the window', value: 'active' },
   { label: 'No activity in the window', value: 'inactive' },
+  { label: 'Activity not checked', value: 'unchecked' },
   { label: 'New since previous review', value: 'new' },
 ];
 const DECISION_FILTERS = [
@@ -151,7 +155,7 @@ const DECISION_FILTERS = [
   { label: 'Remove', value: 'remove' },
   { label: 'Follow up', value: 'flag' },
 ];
-const ALL_PRODUCTS = { label: 'All products', value: '' };
+const ALL_PRODUCTS = { label: 'All Jira products', value: '' };
 const ALL_GROUPS = { label: 'All groups', value: '' };
 
 const decisionAppearance = { keep: 'primary', remove: 'danger', flag: 'warning' };
@@ -186,6 +190,10 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
   const [viewFilter, setViewFilter] = useState(ALL);
   const [decisionFilter, setDecisionFilter] = useState(DECISION_FILTERS[0]);
   const [justCompleted, setJustCompleted] = useState(false);
+  // Decisions are sent one at a time, in the order they were clicked, so two
+  // saves never race each other on the server.
+  const sending = useRef(Promise.resolve());
+  const [pending, setPending] = useState(0);
 
   const [reviewHidden, setReviewHidden] = useState(true);
   const hideReview = () => {
@@ -226,36 +234,58 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
     }
   };
 
+  const cancel = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await invoke('cancelScan');
+      if (!res?.ok) throw new Error(res?.error ?? 'refused');
+      await refresh();
+    } catch (err) {
+      setMessage(`Could not cancel the snapshot: ${err?.message ?? 'no response'}.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const locked = review?.status === 'complete';
 
   // Decisions are applied on the page first and sent after, so a slow network
   // never makes a click feel ignored. A refused change is put back. Clearing
   // a decision clears its note too, as the server does.
-  const decide = async (row, decision, note = decision ? (row.note ?? '') : '') => {
+  const decide = (row, decision, note = decision ? (row.note ?? '') : '') => {
     const previous = { decision: row.decision, note: row.note };
+    const reviewId = review.id;
     setRows((prev) => prev.map((r) => (r.accountId === row.accountId ? { ...r, decision, note } : r)));
-    try {
-      const res = await invoke('setDecision', { reviewId: review.id, accountId: row.accountId, decision, note });
-      if (!res?.ok) throw new Error(res?.error ?? 'refused');
-      setRows((prev) =>
-        prev.map((r) =>
-          r.accountId === row.accountId
-            ? { ...r, decision: res.decision ?? decision, note: res.note ?? note, decidedAt: res.at ?? null, decidedByName: decision ? 'you' : null }
-            : r
-        )
-      );
-    } catch (err) {
-      setRows((prev) => prev.map((r) => (r.accountId === row.accountId ? { ...r, ...previous } : r)));
-      setMessage(`Could not save that decision: ${err?.message ?? 'no response'}.`);
-    }
+    setPending((n) => n + 1);
+    const send = async () => {
+      try {
+        const res = await invoke('setDecision', { reviewId, accountId: row.accountId, decision, note });
+        if (!res?.ok) throw new Error(res?.error ?? 'refused');
+        setRows((prev) =>
+          prev.map((r) =>
+            r.accountId === row.accountId
+              ? { ...r, decision: res.decision ?? decision, note: res.note ?? note, decidedAt: res.at ?? null, decidedByName: decision ? 'you' : null }
+              : r
+          )
+        );
+      } catch (err) {
+        setRows((prev) => prev.map((r) => (r.accountId === row.accountId ? { ...r, ...previous } : r)));
+        setMessage(`Could not save that decision: ${err?.message ?? 'no response'}.`);
+      } finally {
+        setPending((n) => n - 1);
+      }
+    };
+    sending.current = sending.current.then(send, send);
+    return sending.current;
   };
 
   const keepAllActive = async () => {
-    const ids = rows.filter((r) => r.active && !r.decision && !r.admin).map((r) => r.accountId);
-    if (!ids.length) return;
     setBusy(true);
     try {
-      const res = await invoke('setDecisionsBulk', { reviewId: review.id, accountIds: ids, decision: 'keep' });
+      await sending.current;
+      // The server picks the rows from the stored review, so the request stays small on any site.
+      const res = await invoke('setDecisionsBulk', { reviewId: review.id, decision: 'keep' });
       if (!res?.ok) throw new Error(res?.error ?? 'refused');
       await reload();
     } catch (err) {
@@ -269,7 +299,15 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
     setConfirmOpen(false);
     setBusy(true);
     try {
-      const res = await invoke('completeReview', { reviewId: review.id });
+      // Every click has been saved before the count is taken.
+      await sending.current;
+      const res = await invoke('completeReview', { reviewId: review.id, expectedUndecided: liveStats.undecided });
+      if (res?.changed) {
+        // Storage does not hold what this page shows. Nothing was signed; show what is stored.
+        setMessage(res.error);
+        await reload();
+        return;
+      }
       if (!res?.ok) throw new Error(res?.error ?? 'refused');
       setJustCompleted(true);
       await refresh();
@@ -298,7 +336,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
 
   const products = review?.products ?? [];
   const productOptions = useMemo(
-    () => [ALL_PRODUCTS, ...products.map((p) => ({ label: p.name, value: p.name })), { label: 'No product access', value: 'none' }],
+    () => [ALL_PRODUCTS, ...products.map((p) => ({ label: p.name, value: p.name })), { label: 'No Jira product access', value: 'none' }],
     [products]
   );
   const groupOptions = useMemo(
@@ -312,7 +350,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
         product: productFilter.value || null,
         group: groupFilter.value || null,
         adminOnly: viewFilter.value === 'admins',
-        activity: viewFilter.value === 'active' || viewFilter.value === 'inactive' ? viewFilter.value : null,
+        activity: ['active', 'inactive', 'unchecked'].includes(viewFilter.value) ? viewFilter.value : null,
         decision: decisionFilter.value || null,
         newOnly: viewFilter.value === 'new',
       }),
@@ -321,7 +359,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
   const filtering = Boolean(query || productFilter.value || groupFilter.value || viewFilter.value || decisionFilter.value);
   const liveStats = useMemo(() => decisionStats(rows, Object.fromEntries(rows.map((r) => [r.accountId, { decision: r.decision }]))), [rows]);
   const decided = liveStats.total - liveStats.undecided;
-  const activeUndecided = rows.filter((r) => r.active && !r.decision && !r.admin).length;
+  const activeUndecided = rows.filter((r) => isActiveNonAdmin(r) && !r.decision).length;
   const changes = review?.changes;
   const hasReviews = (status?.reviews ?? []).length > 0;
 
@@ -329,6 +367,39 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
     setNoteFor(row);
     setNoteText(row.note ?? '');
   };
+
+  // Tell the evidence frame which review is open: now, and again when the
+  // frame says it has loaded (it loads after the page). If the events do not
+  // arrive, the frame keeps its default, the newest review.
+  const openId = review?.id ?? null;
+  const openStatus = review?.status ?? null;
+  useEffect(() => {
+    if (!openId) return undefined;
+    const tell = () => {
+      try {
+        Promise.resolve(events.emit(OPEN_REVIEW_EVENT, { id: openId })).catch(() => {});
+      } catch {
+        // no events in this host
+      }
+    };
+    let subscription = null;
+    let gone = false;
+    tell();
+    try {
+      Promise.resolve(events.on(FRAME_READY_EVENT, tell))
+        .then((sub) => {
+          if (gone) sub?.unsubscribe?.();
+          else subscription = sub;
+        })
+        .catch(() => {});
+    } catch {
+      // no events in this host
+    }
+    return () => {
+      gone = true;
+      subscription?.unsubscribe?.();
+    };
+  }, [openId, openStatus]);
 
   return (
     <Stack space="space.200">
@@ -350,7 +421,16 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
       {running && !stale && (
         <Stack space="space.075">
           <ProgressBar ariaLabel="Snapshot progress" value={scan.value} isIndeterminate={scan.indeterminate} />
-          <Text>{phaseText(state)}. You can leave this page — the snapshot continues.</Text>
+          <Inline space="space.100" alignBlock="center" shouldWrap>
+            <Text>
+              {state.paused
+                ? `${phaseText(state)}. The snapshot is paused. It continues while this page is open.`
+                : `${phaseText(state)}. You can leave this page — the snapshot continues.`}
+            </Text>
+            <Button appearance="subtle" spacing="compact" onClick={cancel} isDisabled={busy}>
+              Cancel snapshot
+            </Button>
+          </Inline>
         </Stack>
       )}
 
@@ -385,7 +465,8 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
               Snapshot {fmtTime(review.generatedAt)}
               {review.startedByName ? ` by ${review.startedByName}` : ''} · {plural(review.counts?.users ?? 0, 'user', 'users')} ·{' '}
               {review.counts?.admins ?? 0} in admin groups · {review.counts?.inactive ?? 0} with no activity in{' '}
-              {review.days} days · {review.counts?.noAccess ?? 0} with no product access
+              {review.days} days{review.counts?.unchecked ? ` · ${review.counts.unchecked} not checked` : ''} ·{' '}
+              {review.counts?.noAccess ?? 0} with no Jira product access
             </Text>
             {locked && (
               <Text>
@@ -394,6 +475,13 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                 {review.stats?.remove ?? 0} remove, {review.stats?.flag ?? 0} follow up, {review.stats?.undecided ?? 0} undecided.
               </Text>
             )}
+            {(review.signoffs ?? []).map((s) => (
+              <Text key={`${s.completedAt}-${s.reopenedAt}`} size="small">
+                Earlier sign-off: {fmtTime(s.completedAt)}
+                {s.completedByName ? ` by ${s.completedByName}` : ''} ({totalsText(s.stats)}). Reopened {fmtTime(s.reopenedAt)}
+                {s.reopenedByName ? ` by ${s.reopenedByName}` : ''}.
+              </Text>
+            ))}
           </Stack>
 
           {!locked && (
@@ -402,6 +490,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
               <Text>
                 {decided} of {liveStats.total} decided · {liveStats.keep} keep · {liveStats.remove} remove · {liveStats.flag} follow up
                 {liveStats.undecided ? ` · ${liveStats.undecided} undecided` : ''}
+                {pending ? ` · saving ${pending}…` : ''}
               </Text>
             </Stack>
           )}
@@ -429,10 +518,10 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
               </Button>
             ) : (
               <>
-                <Button appearance="primary" onClick={() => setConfirmOpen(true)} isDisabled={busy || !gate.allowed || !rows.length}>
+                <Button appearance="primary" onClick={() => setConfirmOpen(true)} isDisabled={busy || loading || !gate.allowed || !rows.length}>
                   Complete review
                 </Button>
-                <Button onClick={keepAllActive} isDisabled={busy || !activeUndecided || !gate.allowed}>
+                <Button onClick={keepAllActive} isDisabled={busy || loading || !activeUndecided || !gate.allowed}>
                   Keep all active non-admins ({activeUndecided})
                 </Button>
               </>
@@ -452,7 +541,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
               />
             </Box>
             <Box xcss={{ minWidth: '180px' }}>
-              <Label labelFor="product-filter">Product</Label>
+              <Label labelFor="product-filter">Jira product</Label>
               <Select id="product-filter" options={productOptions} value={productFilter} onChange={(v) => setProductFilter(v ?? ALL_PRODUCTS)} />
             </Box>
             <Box xcss={{ minWidth: '200px' }}>
@@ -493,7 +582,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
             head={{
               cells: [
                 { key: 'name', content: 'User', isSortable: true },
-                { key: 'products', content: 'Products', isSortable: true },
+                { key: 'products', content: 'Jira products', isSortable: true },
                 { key: 'groups', content: 'Groups' },
                 { key: 'activity', content: 'Activity', isSortable: true },
                 { key: 'decision', content: 'Decision', isSortable: true },
@@ -518,7 +607,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                 },
                 {
                   key: `products-${(r.products ?? []).join(',') || '~'}`,
-                  content: (r.products ?? []).length ? (r.products ?? []).join(', ') : <Lozenge appearance="default">No product access</Lozenge>,
+                  content: (r.products ?? []).length ? (r.products ?? []).join(', ') : <Lozenge appearance="default">No Jira product access</Lozenge>,
                 },
                 {
                   key: `groups-${(r.groupNames ?? []).length}`,
@@ -531,8 +620,10 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                   ),
                 },
                 {
-                  key: `activity-${r.active ? 'a' : `i${r.severity ?? 0}`}`,
-                  content: r.active ? (
+                  key: `activity-${r.active ? 'a' : r.unchecked ? 'n' : `i${r.severity ?? 0}`}`,
+                  content: r.unchecked ? (
+                    <Lozenge appearance="default">Not checked</Lozenge>
+                  ) : r.active ? (
                     <Stack space="space.025">
                       <Lozenge appearance="success">Active</Lozenge>
                       {r.lastActivityAt && <Text size="small">last seen {fmtDate(r.lastActivityAt)}</Text>}
@@ -665,7 +756,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
 
 const GROUP_VIEWS = [
   { label: 'All groups', value: '' },
-  { label: 'Grant a product', value: 'grants' },
+  { label: 'Grant a Jira product', value: 'grants' },
   { label: 'Admin groups', value: 'admin' },
   { label: 'Empty groups', value: 'empty' },
 ];
@@ -686,7 +777,8 @@ function GroupsPanel({ review }) {
     <Stack space="space.150">
       <Text>
         Every group on the site at the time of the snapshot ({fmtDate(review.generatedAt)}), including empty ones. "Grants"
-        is what Atlassian's application roles say the group gives access to; admin groups are recognised by name.
+        is the Jira products that Jira's application roles say the group gives access to; other products, such as
+        Confluence, are not read. Admin groups are recognised by name.
       </Text>
       <Inline space="space.100" alignBlock="end" shouldWrap>
         <Box xcss={{ minWidth: '220px' }}>
@@ -712,7 +804,7 @@ function GroupsPanel({ review }) {
       </Inline>
       <Text>
         Showing {visible.length} of {groups.length} · {groups.filter((g) => g.empty).length} empty ·{' '}
-        {groups.filter((g) => g.products.length).length} grant a product
+        {groups.filter((g) => g.products.length).length} grant a Jira product
       </Text>
       <DynamicTable
         head={{
@@ -760,7 +852,8 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
     <Stack space="space.150">
       <Text>
         The last {reviews.length} {reviews.length === 1 ? 'review' : 'reviews'}. Open one to see it in the Review tab; the
-        evidence download there lets you pick any review.
+        evidence download there follows the review you open. The app keeps 12 reviews: a new snapshot removes the oldest
+        review that is not signed off, and a signed-off review is only removed when you delete it.
       </Text>
       <DynamicTable
         head={{
@@ -784,6 +877,9 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
                 <Stack space="space.025">
                   <Lozenge appearance={r.status === 'complete' ? 'success' : 'inprogress'}>{r.status === 'complete' ? 'Signed off' : 'Open'}</Lozenge>
                   {r.status === 'complete' && <Text size="small">{fmtDate(r.completedAt)}</Text>}
+                  {r.status !== 'complete' && (r.signoffs ?? []).length > 0 && (
+                    <Text size="small">Reopened {fmtDate(r.signoffs[r.signoffs.length - 1].reopenedAt)}</Text>
+                  )}
                 </Stack>
               ),
             },
@@ -792,7 +888,10 @@ function PastReviewsPanel({ reviews, currentId, onOpen, onDelete, busy }) {
             { key: 'inactive', content: r.counts?.inactive ?? '—' },
             {
               key: 'decisions',
-              content: r.stats ? `${r.stats.keep} keep · ${r.stats.remove} remove · ${r.stats.flag} follow up${r.stats.undecided ? ` · ${r.stats.undecided} undecided` : ''}` : '—',
+              content:
+                r.status === 'complete' && r.stats
+                  ? `${r.stats.keep} keep · ${r.stats.remove} remove · ${r.stats.flag} follow up${r.stats.undecided ? ` · ${r.stats.undecided} undecided` : ''}`
+                  : '—',
             },
             {
               key: 'act',
@@ -829,6 +928,7 @@ const App = () => {
   const [busy, setBusy] = useState(false);
   const [toDelete, setToDelete] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
+  const [statusError, setStatusError] = useState(false);
 
   useEffect(() => {
     view
@@ -843,8 +943,10 @@ const App = () => {
     try {
       const res = await invoke('getStatus');
       setStatus(res);
+      setStatusError(false);
       return res;
     } catch {
+      setStatusError(true);
       return null;
     }
   }, []);
@@ -949,6 +1051,11 @@ const App = () => {
       {deleteError && (
         <SectionMessage appearance="warning">
           <Text>{deleteError}</Text>
+        </SectionMessage>
+      )}
+      {statusError && !status && (
+        <SectionMessage appearance="error" title="Could not load your reviews">
+          <Text>The app did not answer. Your reviews are still stored. Refresh the page to try again.</Text>
         </SectionMessage>
       )}
       <Tabs id="access-review-tabs">

@@ -17,9 +17,11 @@ modules:
       handler: index.handler
     - key: scan-worker
       handler: worker.handler
-      # Slices stop themselves at SLICE.softBudgetMs; this is the hard ceiling
-      # that leaves room for the final storage writes of a slice.
-      timeoutSeconds: 60
+      # Slices stop themselves at SLICE.softBudgetMs (240s); this is the hard
+      # ceiling that leaves room for the final storage writes of a slice. Long
+      # slices keep a snapshot well inside Forge's limit of 1,000 queue pushes
+      # in one chain.
+      timeoutSeconds: 300
 resources:
   - key: main
     path: src/frontend/index.jsx
@@ -37,10 +39,10 @@ permissions:
   scopes:
     # Every scope is read-only. There is deliberately no write scope, so the
     # platform itself prevents this app from changing anything.
-    - read:jira-user # users' current groups; the site directory fallback
+    - read:jira-user # confirms the person using the app is a Jira administrator (/mypermissions, as that user)
     - read:jira-work # recent issue activity: who did what, and when
-    - read:application-role:jira # which groups grant which product, and Atlassian's seat counts
+    - read:application-role:jira # which groups grant which Jira product, and Atlassian's seat counts
     - read:group:jira # every group on the site and its members
-    - read:user:jira # active flag and account type, to leave out bots and customers
+    - read:user:jira # active flag and account type, to leave out bots and customers; names and emails at display time
     - read:avatar:jira # required alongside read:user:jira by the group-member endpoint
     - storage:app

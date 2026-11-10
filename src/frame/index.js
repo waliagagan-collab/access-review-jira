@@ -1,14 +1,15 @@
-import { invoke } from '@forge/bridge';
+import { invoke, events } from '@forge/bridge';
 import { buildXlsx, toCsv } from './xlsx.js';
-import { sheetsOf, day } from './evidence.js';
+import { sheetsOf, stamp, fileStamp } from './evidence.js';
 import { decisionStats } from '../lib/review.js';
+import { OPEN_REVIEW_EVENT, FRAME_READY_EVENT } from '../lib/ui.js';
 
 /**
  * The one thing UI Kit cannot do is hand the browser a file. This tiny
  * Custom UI resource lives inside a UI Kit <Frame> purely to turn a review
- * into an evidence file: an Excel workbook with a Summary sheet, a Users sheet
- * and a Groups sheet, or a CSV of the users. It talks to the same resolvers
- * as the page.
+ * into an evidence file: an Excel workbook with Summary, Users, Groups and
+ * Changes sheets, or a CSV of the users. It talks to the same resolvers as
+ * the page.
  */
 
 const $ = (id) => document.getElementById(id);
@@ -26,6 +27,14 @@ function offerDownload(blob, filename) {
 }
 
 let reviews = [];
+// The review open on the page, once the page has said which. Until then the
+// newest review stays selected.
+let wanted = null;
+
+function selectWanted() {
+  const sel = $('review');
+  if (wanted && reviews.some((r) => r.id === wanted)) sel.value = wanted;
+}
 
 async function loadReviews() {
   try {
@@ -37,7 +46,7 @@ async function loadReviews() {
     for (const r of reviews) {
       const opt = document.createElement('option');
       opt.value = r.id;
-      opt.textContent = `${day(r.startedAt)} · ${r.status === 'complete' ? 'signed off' : 'open'} · ${r.counts?.users ?? '?'} users`;
+      opt.textContent = `${stamp(r.generatedAt)} · ${r.status === 'complete' ? 'signed off' : 'open'} · ${r.counts?.users ?? '?'} users`;
       sel.appendChild(opt);
     }
     const any = reviews.length > 0;
@@ -45,6 +54,7 @@ async function loadReviews() {
     $('excel').disabled = !any;
     $('csv').disabled = !any;
     $('status').textContent = any ? '' : 'No review yet.';
+    selectWanted();
   } catch (err) {
     $('status').textContent = `Could not list reviews: ${err?.message ?? 'no response'}.`;
   }
@@ -68,7 +78,7 @@ async function download(kind) {
     }
     const stats = decisionStats(rows, Object.fromEntries(rows.map((r) => [r.accountId, { decision: r.decision }])));
     const sheets = sheetsOf(first.review, rows, stats);
-    const name = `access-review-${day(first.review.startedAt)}`;
+    const name = `access-review-${fileStamp(first.review.generatedAt ?? first.review.startedAt)}`;
     if (kind === 'xlsx') {
       const blob = new Blob([buildXlsx(sheets)], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -87,8 +97,25 @@ async function download(kind) {
   }
 }
 
+/**
+ * Follow the page: select the review it has open. If the events never arrive
+ * the dropdown simply keeps its default, the newest review.
+ */
+async function followPage() {
+  try {
+    await events.on(OPEN_REVIEW_EVENT, (payload) => {
+      wanted = payload?.id ? String(payload.id) : null;
+      selectWanted();
+    });
+    await events.emit(FRAME_READY_EVENT);
+  } catch {
+    // No events in this host: the default selection stays.
+  }
+}
+
 if (typeof document !== 'undefined' && $('excel')) {
   $('excel').addEventListener('click', () => download('xlsx'));
   $('csv').addEventListener('click', () => download('csv'));
+  followPage();
   loadReviews();
 }

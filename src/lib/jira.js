@@ -6,9 +6,11 @@ import api, { route } from '@forge/api';
  * the thing customers will argue with, so it stays explicit and in one place.
  *
  * Two layers:
- *   1. A cheap SWEEP over recently-updated issues proves most users active.
- *   2. An exhaustive per-user VERIFY query runs only for the remaining
- *      candidates, so a wrong answer can't come from the sweep being partial.
+ *   1. A cheap SWEEP over recently-updated issues proves most users active
+ *      and gives the date they were last seen.
+ *   2. A per-user VERIFY query runs for everyone the sweep did not see. It
+ *      covers every kind of update, comments included, so a wrong answer
+ *      can't come from the sweep being partial.
  */
 
 // ---------------------------------------------------------------------------
@@ -119,8 +121,8 @@ const BULK_CONCURRENCY = 5;
 
 /**
  * Resolve display names and emails for account IDs at read time. The result
- * always reflects current profiles and privacy settings, and it means the
- * report at rest contains account IDs and dormancy bands, nothing else.
+ * always reflects current profiles and privacy settings, and it means no
+ * name or email is ever written to storage.
  */
 export async function fetchUsersBulk(accountIds) {
   const ids = [...new Set((accountIds ?? []).filter(Boolean))];
@@ -196,15 +198,19 @@ const epoch = (iso) => {
  *
  * Only things a person DID count, and only inside the window (`since`).
  * Being assigned is done TO you — the changelog records who did the
- * assigning — so the assignee field alone is not a signal. Creator and
- * reporter are stamped at `created`, which is when that person acted, never
- * at `updated`, which may be someone else's edit.
+ * assigning — so the assignee field alone is not a signal. The same goes for
+ * the reporter when someone else raised the issue: the reporter counts only
+ * when it is also the creator. The creator is stamped at `created`, which is
+ * when that person acted, never at `updated`, which may be someone else's edit.
  *
- * The window matters: `expand=changelog` returns an issue's WHOLE history and
- * `comment` its whole comment list, so a recently updated issue carries the
- * names of everyone who ever touched it. Without the cut-off, a colleague who
- * left two years ago would look active every time someone edits an old
- * ticket they once commented on — the exact person this report exists to find.
+ * The window matters: a recently updated issue carries the names of people
+ * who touched it long ago. Without the cut-off, a colleague who left two
+ * years ago would look active every time someone edits an old ticket they
+ * once commented on — the exact person this report exists to find.
+ *
+ * The search returns only the most recent part of a busy issue's history and
+ * comments (Jira caps both per issue), so the sweep can miss someone. That is
+ * why it only ever proves activity; the per-user query decides inactivity.
  */
 export function reduceIssues(issues, since) {
   const activity = {};
@@ -233,7 +239,9 @@ export function reduceIssues(issues, since) {
       mark(c?.updateAuthor, c?.updated, 'commented');
     }
     mark(f.creator, f.created, 'created an issue');
-    mark(f.reporter, f.created, 'reported an issue');
+    if (f.reporter?.accountId && f.reporter.accountId === f.creator?.accountId) {
+      mark(f.reporter, f.created, 'reported an issue');
+    }
   }
 
   for (const entry of Object.values(activity)) delete entry.ts;
@@ -255,6 +263,8 @@ export async function fetchActivityPage(days, nextPageToken, pageSize) {
     maxResults: pageSize,
     fields: 'creator,reporter,created,comment,worklog',
     expand: 'changelog',
+    // Work in a project that was archived later still counts.
+    includeArchivedProjects: true,
     nextPageToken,
   });
   const body = await getJson(route`/rest/api/3/search/jql?${params}`);
@@ -277,31 +287,37 @@ export async function fetchActivityPage(days, nextPageToken, pageSize) {
  * is documented against date functions.
  *
  * JQL's CHANGED BY works on exactly six fields — status, assignee, priority,
- * resolution, fix version and reporter — and all six are used, so the only
- * actions this query cannot see are comments and edits to other fields.
- * Those are covered by the sweep; see reduceIssues.
+ * resolution, fix version and reporter. `updatedBy()` covers the rest: it
+ * finds issues the user created, commented on or edited in any field within
+ * the range. Being named reporter by someone else is not a clause: that is
+ * done TO the user.
+ *
+ * `worklog: false` leaves out the two work-log clauses. Jira rejects the
+ * whole query when those fields are not available on a site (time tracking
+ * off or hidden), and the query is still useful without them.
  */
 export const CHANGED_FIELDS = ['status', 'assignee', 'priority', 'resolution', 'fixVersion', 'reporter'];
 
-export function buildUserActivityJql(accountId, days) {
+export function buildUserActivityJql(accountId, days, { worklog = true } = {}) {
   const id = JSON.stringify(String(accountId));
   const n = Number(days);
   return [
     ...CHANGED_FIELDS.map((f) => `${f} CHANGED BY ${id} AFTER startOfDay(-${n}d)`),
-    `worklogAuthor = ${id} AND worklogDate >= -${n}d`,
+    `issue in updatedBy(${id}, "-${n}d")`,
+    ...(worklog ? [`worklogAuthor = ${id} AND worklogDate >= -${n}d`] : []),
     `creator = ${id} AND created >= -${n}d`,
-    `reporter = ${id} AND created >= -${n}d`,
   ]
     .map((c) => `(${c})`)
     .join(' OR ');
 }
 
-/** true if the user did anything in Jira within `days`, across ALL issues. */
-export async function wasActiveWithin(accountId, days) {
+/** true if the user did anything in Jira within `days`, across all issues the app can see. */
+export async function wasActiveWithin(accountId, days, options) {
   const params = searchParams({
-    jql: buildUserActivityJql(accountId, days),
+    jql: buildUserActivityJql(accountId, days, options),
     maxResults: 1,
     fields: 'id',
+    includeArchivedProjects: true,
   });
   const body = await getJson(route`/rest/api/3/search/jql?${params}`);
   return (body?.issues ?? []).length > 0;
@@ -334,13 +350,13 @@ export function classifyDormancy(days, probeResults) {
 }
 
 /** Runs the probes for a candidate the sweep could not vouch for. */
-export async function verifyCandidate(accountId, days) {
-  if (await wasActiveWithin(accountId, days)) return { active: true };
+export async function verifyCandidate(accountId, days, options) {
+  if (await wasActiveWithin(accountId, days, options)) return { active: true };
 
   const probeResults = {};
   for (const p of PROBES) {
     if (p <= days) continue;
-    probeResults[p] = await wasActiveWithin(accountId, p);
+    probeResults[p] = await wasActiveWithin(accountId, p, options);
     if (probeResults[p]) break; // found the band; no need to look wider
   }
   return { active: false, ...classifyDormancy(days, probeResults) };

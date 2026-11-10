@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { unzipSync, strFromU8 } from 'fflate';
-import { scanProgress, showReviewPrompt } from '../src/lib/ui.js';
+import { scanProgress, showReviewPrompt, utcDay, utcStamp } from '../src/lib/ui.js';
 import { buildXlsx, columnName, xmlText, csvCell, toCsv } from '../src/frame/xlsx.js';
 
 test('progress is indeterminate until the per-user check, then counts shards', () => {
@@ -54,4 +54,16 @@ test('the review request appears once value is shown and never after it is close
   assert.equal(showReviewPrompt({ earned: false, hidden: false }), false);
   assert.equal(showReviewPrompt({ earned: true, hidden: true }), false);
   assert.equal(showReviewPrompt({ earned: undefined, hidden: undefined }), false);
+});
+
+test('dates are shown in UTC whatever offset Jira returned them with', () => {
+  // 03:00 at +05:30 is 21:30 UTC the day before.
+  assert.equal(utcDay('2026-09-04T03:00:00.000+0530'), '2026-09-03');
+  assert.equal(utcStamp('2026-09-04T03:00:00.000+0530'), '2026-09-03 21:30 UTC');
+  assert.equal(utcDay('2026-10-13T02:40:00.000Z'), '2026-10-13');
+  assert.equal(utcStamp('2026-10-13T02:40:00.000Z'), '2026-10-13 02:40 UTC');
+  for (const none of [undefined, null, '', 'not a date']) {
+    assert.equal(utcDay(none), '');
+    assert.equal(utcStamp(none), '');
+  }
 });

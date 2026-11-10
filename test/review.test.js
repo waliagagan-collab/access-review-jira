@@ -13,10 +13,13 @@ import {
   filterReviewRows,
   quarterName,
   flagChanges,
+  signoffHistory,
+  withSignoffs,
+  isActiveNonAdmin,
   MAX_NOTE,
 } from '../src/lib/review.js';
 import { activityOf } from '../src/worker.js';
-import { sheetsOf } from '../src/frame/evidence.js';
+import { sheetsOf, fileStamp } from '../src/frame/evidence.js';
 import { buildXlsx } from '../src/frame/xlsx.js';
 
 const GROUPS = {
@@ -71,11 +74,15 @@ test('group summary counts members in the review and flags empty and admin group
   assert.equal(g.find((x) => x.id === 'g-empty').empty, true);
 });
 
-test('admin groups are recognised by a whole word, not by any name containing "admin"', () => {
+test('admin groups are recognised by a word that is or ends with an admin word, not by any name containing "admin"', () => {
   for (const name of ['jira-admins-acme', 'site-admins', 'org-admins', 'administrators', 'jira-administrators', 'sysadmin', 'Admin', 'ADMIN-team', 'confluence_admin']) {
     assert.equal(isAdminGroupName(name), true, name);
   }
-  for (const name of ['badminton-club', 'administrative-assistants', 'padmin', 'adminton', 'design-team', '', null]) {
+  // Written without a separator, or in camel case.
+  for (const name of ['JiraAdmins', 'siteadmins', 'itadmin', 'ITADMINS', 'JiraAdministrators', 'jiraAdmin2', 'sysadmins', 'Jira-Administratoren', 'platformSysadmins']) {
+    assert.equal(isAdminGroupName(name), true, name);
+  }
+  for (const name of ['badminton-club', 'Badminton', 'administrative-assistants', 'AdministrativeStaff', 'adminton', 'administration', 'design-team', '', null]) {
     assert.equal(isAdminGroupName(name), false, String(name));
   }
 });
@@ -96,6 +103,67 @@ test('rows carry their own new and became-admin flags, with no cap', () => {
   assert.equal(flagged[1].becameAdmin, true);
   assert.equal(flagged[2].newSinceLast, true);
   assert.deepEqual(flagChanges(current, undefined).map((r) => r.newSinceLast), [true, true, true]);
+});
+
+test('a new account that sits in an admin group is a new admin too', () => {
+  const previous = [{ accountId: 'stays', admin: true, products: ['Jira Software'] }];
+  const current = [
+    { accountId: 'stays', admin: true, products: ['Jira Software', 'Jira Service Management'] },
+    { accountId: 'new-admin', admin: true, products: [] },
+    { accountId: 'new-user', admin: false, products: [] },
+  ];
+  const flagged = flagChanges(current, previous);
+  assert.equal(flagged[0].becameAdmin, undefined, 'was an admin before');
+  assert.deepEqual(flagged[0].gainedProducts, ['Jira Service Management']);
+  assert.equal(flagged[1].newSinceLast, true);
+  assert.equal(flagged[1].becameAdmin, true);
+  assert.equal(flagged[2].becameAdmin, undefined);
+  assert.equal(flagged[2].gainedProducts, undefined);
+  const d = diffReviews(current, previous);
+  assert.deepEqual(d.added, ['new-admin', 'new-user']);
+  assert.deepEqual(d.becameAdmin, ['new-admin']);
+  assert.deepEqual(d.counts, { added: 2, removed: 0, becameAdmin: 1, gainedProducts: 1 });
+});
+
+test('a person Jira would not answer for is neither active nor inactive, and is never bulk-kept', () => {
+  assert.deepEqual(activityOf('unchecked'), { active: false, unchecked: true });
+  const r = buildRow('u1', { groups: ['g-jsw'] }, GROUPS, activityOf('unchecked'));
+  assert.equal(r.active, false);
+  assert.equal(r.unchecked, true);
+  assert.equal(r.label, 'Not checked');
+  const rows = [
+    { accountId: 'a', active: true, admin: false },
+    { accountId: 'b', active: false, admin: false },
+    { accountId: 'c', active: false, admin: false, unchecked: true },
+    { accountId: 'd', active: true, admin: true },
+  ];
+  const ids = (f) => filterReviewRows(rows, f).map((x) => x.accountId);
+  assert.deepEqual(ids({ activity: 'active' }), ['a', 'd']);
+  assert.deepEqual(ids({ activity: 'inactive' }), ['b']);
+  assert.deepEqual(ids({ activity: 'unchecked' }), ['c']);
+  assert.deepEqual(rows.filter(isActiveNonAdmin).map((x) => x.accountId), ['a']);
+});
+
+test('the sign-off history reads both stored shapes', () => {
+  const stats = { total: 2, keep: 2, remove: 0, flag: 0, undecided: 0 };
+  // Signed off, never reopened.
+  const signed = { status: 'complete', completedAt: '2026-10-01T01:00:00Z', completedBy: 'a', stats };
+  assert.deepEqual(signoffHistory(signed), []);
+  assert.equal(withSignoffs(signed).completedAt, '2026-10-01T01:00:00Z');
+  // Reopened by the previous version: the sign-off is still in the live fields.
+  const legacy = { ...signed, status: 'open', reopenedAt: '2026-10-20T09:00:00Z', reopenedBy: 'b' };
+  assert.deepEqual(signoffHistory(legacy), [{ completedAt: '2026-10-01T01:00:00Z', completedBy: 'a', stats, reopenedAt: '2026-10-20T09:00:00Z', reopenedBy: 'b' }]);
+  const seen = withSignoffs(legacy);
+  assert.equal(seen.completedAt, null);
+  assert.equal(seen.completedBy, null);
+  assert.equal(seen.stats, null);
+  assert.equal(seen.signoffs.length, 1);
+  // Reopened by this version: the history is stored.
+  const current = { status: 'open', completedAt: null, signoffs: [{ completedAt: 'x', completedBy: 'a', stats, reopenedAt: 'y', reopenedBy: 'b' }] };
+  assert.equal(signoffHistory(current), current.signoffs);
+  // Never signed off.
+  assert.deepEqual(signoffHistory({ status: 'open' }), []);
+  assert.deepEqual(withSignoffs({ status: 'open' }).signoffs, []);
 });
 
 test('the diff names who was added, who left, who became an admin and who gained products', () => {
@@ -151,7 +219,7 @@ test('quarter names', () => {
   assert.equal(quarterName('not a date'), '');
 });
 
-test('the evidence workbook has summary, users and groups sheets and no live formulas', () => {
+test('the evidence workbook has summary, users, groups and changes sheets and no live formulas', () => {
   const review = {
     startedAt: '2026-10-13T01:00:00Z', generatedAt: '2026-10-13T01:05:00Z', status: 'complete', completedAt: '2026-10-13T02:00:00Z',
     startedByName: 'Gagan', completedByName: 'Gagan', days: 90, counts: { users: 2, admins: 1, inactive: 1, noAccess: 0 },
@@ -163,15 +231,98 @@ test('the evidence workbook has summary, users and groups sheets and no live for
     { accountId: 'b', displayName: 'Bo', email: 'bo@x.com', products: [], groupNames: [], admin: false, active: false, label: 'Over a year, or never', decision: null, note: 'Left in May', newSinceLast: true },
   ];
   const sheets = sheetsOf(review, rows, { keep: 1, remove: 0, flag: 0, undecided: 1 });
-  assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'Users', 'Groups']);
+  assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'Users', 'Groups', 'Changes']);
   assert.equal(sheets[1].table[1][7], 'Keep');
   assert.equal(sheets[1].table[2][7], 'Undecided');
   const files = unzipSync(buildXlsx(sheets));
   const names = Object.keys(files);
-  assert.ok(names.includes('xl/worksheets/sheet3.xml'));
+  assert.ok(names.includes('xl/worksheets/sheet4.xml'));
   const workbook = strFromU8(files['xl/workbook.xml']);
   assert.match(workbook, /name="Users"/);
+  assert.match(workbook, /name="Changes"/);
   const users = strFromU8(files['xl/worksheets/sheet2.xml']);
   assert.ok(users.includes('t="inlineStr"'), 'values are text, never formulas');
   assert.ok(!/<f>/.test(users));
+});
+
+const cell = (table, label) => table.find((r) => r[0] === label)?.[1];
+
+test('the workbook says "Jira products", and counts people who were not checked', () => {
+  const review = { status: 'open', startedAt: '2026-10-13T01:00:00Z', generatedAt: '2026-10-13T01:05:00Z', counts: { users: 2, admins: 0, inactive: 0, unchecked: 1, noAccess: 1 }, products: [{ name: 'Jira Software', userCount: 1 }], groups: [], warnings: ['w1'] };
+  const rows = [
+    { accountId: 'a', displayName: 'Ann', products: [], groupNames: ['confluence-users'], active: false, unchecked: true, label: 'Not checked' },
+    { accountId: 'b', displayName: 'Bo', products: ['Jira Software'], groupNames: [], active: true },
+  ];
+  const [summary, users, groups] = sheetsOf(review, rows, {}).map((s) => s.table);
+  assert.equal(cell(summary, 'Users with no Jira product access'), 1);
+  assert.equal(cell(summary, 'Users whose activity was not checked'), 1);
+  assert.equal(cell(summary, 'Jira products (seats Atlassian counts)'), 'Jira Software: 1');
+  assert.equal(cell(summary, 'Users with no product access'), undefined);
+  assert.equal(users[0][3], 'Jira products');
+  assert.equal(users[1][6], 'Not checked');
+  assert.equal(users[2][6], 'Active in the window');
+  assert.equal(groups[0][1], 'Grants (Jira products)');
+  // A review saved before the count existed shows 0.
+  assert.equal(cell(sheetsOf({ ...review, counts: { users: 2 } }, rows, {})[0].table, 'Users whose activity was not checked'), 0);
+});
+
+test('"last seen" in the workbook is the UTC day, the same day the page shows', () => {
+  const review = { status: 'open', startedAt: '2026-09-05T00:00:00Z', generatedAt: '2026-09-05T00:10:00Z', groups: [] };
+  // 03:00 at +05:30 is 21:30 UTC the day before.
+  const rows = [{ accountId: 'a', displayName: 'Ann', active: true, lastActivityAt: '2026-09-04T03:00:00.000+0530' }];
+  assert.equal(sheetsOf(review, rows, {})[1].table[1][6], 'Active (last seen 2026-09-03)');
+  assert.equal(fileStamp('2026-10-13T02:40:59.000Z'), '2026-10-13-0240');
+  assert.equal(fileStamp(undefined), '');
+});
+
+test('an open review prints no sign-off, and earlier sign-offs are listed with who reopened them', () => {
+  const stats = { total: 3, keep: 2, remove: 1, flag: 0, undecided: 0 };
+  const base = { startedAt: '2026-10-01T00:00:00Z', generatedAt: '2026-10-01T00:05:00Z', groups: [] };
+  const history = [{ completedAt: '2026-10-01T01:00:00.000Z', completedByName: 'Ann', stats, reopenedAt: '2026-12-20T10:00:00.000Z', reopenedByName: 'Bo' }];
+
+  // Reopened and not signed again. Even with stale live fields, as the previous version stored them.
+  const open = sheetsOf({ ...base, status: 'open', completedAt: '2026-10-01T01:00:00.000Z', completedByName: 'Ann', signoffs: history }, [], {})[0].table;
+  assert.equal(cell(open, 'Status'), 'Open');
+  assert.equal(cell(open, 'Signed off at'), '');
+  assert.equal(cell(open, 'Signed off by'), '');
+  assert.equal(cell(open, 'Earlier sign-off 1'), 'Signed off 2026-10-01 01:00 UTC by Ann (2 keep, 1 remove, 0 follow up, 0 undecided). Reopened 2026-12-20 10:00 UTC by Bo.');
+
+  // Signed off again by Bo: the new sign-off and the earlier one are both there.
+  const resigned = sheetsOf({ ...base, status: 'complete', completedAt: '2026-12-20T11:00:00.000Z', completedByName: 'Bo', signoffs: history }, [], {})[0].table;
+  assert.equal(cell(resigned, 'Signed off at'), '2026-12-20 11:00 UTC');
+  assert.equal(cell(resigned, 'Signed off by'), 'Bo');
+  assert.match(cell(resigned, 'Earlier sign-off 1'), /by Ann/);
+
+  // Never reopened: no extra line.
+  const plain = sheetsOf({ ...base, status: 'complete', completedAt: '2026-10-01T01:00:00.000Z', completedByName: 'Ann' }, [], {})[0].table;
+  assert.equal(plain.some((r) => String(r[0]).startsWith('Earlier sign-off')), false);
+});
+
+test('the Changes sheet names who is gone, who was added, who gained a product and who joined an admin group', () => {
+  const review = {
+    status: 'open', startedAt: '2026-10-13T01:00:00Z', generatedAt: '2026-10-13T01:05:00Z', groups: [],
+    changes: { counts: { added: 1, removed: 3, becameAdmin: 2, gainedProducts: 2 }, gainedProducts: [{ accountId: 'old-shape', products: ['Jira Service Management'] }] },
+    gone: [{ accountId: 'g1', displayName: 'Gone One', email: 'g1@x.com' }, { accountId: 'g2', displayName: '(unknown)', email: null }],
+  };
+  const rows = [
+    { accountId: 'n1', displayName: 'New Admin', email: 'n1@x.com', newSinceLast: true, becameAdmin: true },
+    { accountId: 'p1', displayName: 'Promoted', becameAdmin: true },
+    { accountId: 'gp', displayName: 'Gained', gainedProducts: ['Jira Software'] },
+    { accountId: 'old-shape', displayName: 'Old Shape' },
+    { accountId: 'same', displayName: 'Same' },
+  ];
+  const changes = sheetsOf(review, rows, {})[3].table;
+  assert.deepEqual(changes[0], ['Change', 'Display name', 'Email', 'Account ID', 'Detail']);
+  assert.deepEqual(changes.slice(1), [
+    ['Gone', 'Gone One', 'g1@x.com', 'g1', 'In the previous review, not in this one'],
+    ['Gone', '(unknown)', '', 'g2', 'In the previous review, not in this one'],
+    ['Gone', '', '', '', '1 more not listed'],
+    ['Added', 'New Admin', 'n1@x.com', 'n1', 'Not in the previous review'],
+    ['Gained a Jira product', 'Gained', '', 'gp', 'Jira Software'],
+    ['Gained a Jira product', 'Old Shape', '', 'old-shape', 'Jira Service Management'],
+    ['Joined an admin group (by name)', 'New Admin', 'n1@x.com', 'n1', ''],
+    ['Joined an admin group (by name)', 'Promoted', '', 'p1', ''],
+  ]);
+  // The first review on a site has nothing to compare with.
+  assert.deepEqual(sheetsOf({ ...review, changes: null }, rows, {})[3].table[1][0], 'No earlier signed-off review to compare with');
 });

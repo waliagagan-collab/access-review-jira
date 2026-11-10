@@ -2,6 +2,9 @@ import ResolverModule from '@forge/resolver';
 import { Queue } from '@forge/events';
 import {
   SHARDS,
+  SCAN_KEY,
+  KEEP_REVIEWS,
+  withLock,
   getScanState,
   setScanState,
   clearRun,
@@ -12,6 +15,7 @@ import {
   getReviewRowPages,
   getReviewGroups,
   getDecisions,
+  getDecisionsSettled,
   setDecisions,
   deleteReview,
   getSettings,
@@ -20,7 +24,8 @@ import {
 import { fetchUsersBulk } from './lib/jira.js';
 import { adminOnly } from './lib/admin.js';
 import { normaliseDays, isStale, licenseGate, licenseMessage } from './lib/scan.js';
-import { normaliseDecision, normaliseNote, decisionStats } from './lib/review.js';
+import { normaliseDecision, normaliseNote, decisionStats, signoffHistory, withSignoffs, isActiveNonAdmin } from './lib/review.js';
+import { utcDay } from './lib/ui.js';
 
 // Forge bundles this ESM file with webpack, and the CommonJS `@forge/resolver`
 // arrives as a namespace object rather than the class. Take the default when
@@ -49,8 +54,21 @@ const licenseRefusal = (context) => {
 /** Review summaries for lists: everything but the big tables. */
 const summaryOf = (m) => {
   if (!m) return null;
-  const { groups, changes, ...rest } = m;
+  const { groups, changes, ...rest } = withSignoffs(m);
   return { ...rest, groupCount: m.groupCount ?? groups?.length ?? 0, changeCounts: changes?.counts ?? null };
+};
+
+const SIGNED_OFF_MESSAGE = 'This review is signed off. Reopen it to change decisions.';
+const BUSY_MESSAGE = 'Another change to this review is being saved. Try again in a moment.';
+
+/** A save that could not get its turn in time is reported, not thrown. */
+const reportBusy = (fn) => async (request) => {
+  try {
+    return await fn(request);
+  } catch (err) {
+    if (err?.busy) return { ok: false, busy: true, error: BUSY_MESSAGE };
+    throw err;
+  }
 };
 
 // --- snapshot -------------------------------------------------------------------
@@ -67,7 +85,21 @@ define('startReview', async ({ payload, context }) => {
   if (existing?.status === 'running' && !isStale(existing)) {
     return { ok: false, error: 'A review snapshot is already being built.' };
   }
-  if (existing?.run) await clearRun(existing.run, existing.groupPages ?? 0);
+
+  // A new review makes room by removing the oldest one that is not signed
+  // off. Signed-off reviews are never removed for the admin, so when every
+  // kept review is signed off the admin has to make the room.
+  const reviews = await listReviews();
+  if (reviews.length >= KEEP_REVIEWS && reviews.every((r) => r.status === 'complete')) {
+    const oldest = reviews[reviews.length - 1];
+    return {
+      ok: false,
+      full: true,
+      error: `Access Review keeps ${KEEP_REVIEWS} reviews and all of them are signed off. Download the evidence for the oldest one (snapshot of ${utcDay(oldest.generatedAt)}), delete it under Past reviews, then start again.`,
+    };
+  }
+
+  if (existing?.run) await clearRun(existing.run, existing.groupPages ?? 0, existing.grantPages ?? 0);
 
   const state = {
     run: `${Date.now()}`,
@@ -102,14 +134,44 @@ define('startReview', async ({ payload, context }) => {
 define('cancelScan', async () => {
   const state = await getScanState();
   if (state?.status === 'running') {
-    await setScanState({ ...state, status: 'cancelled', finishedAt: new Date().toISOString() });
-    await clearRun(state.run, state.groupPages ?? 0);
+    await setScanState({ ...state, status: 'cancelled', paused: false, finishedAt: new Date().toISOString() });
+    await clearRun(state.run, state.groupPages ?? 0, state.grantPages ?? 0);
   }
   return { ok: true };
 });
 
+/**
+ * A run is paused when the worker saved its slice but could not queue the
+ * next one (Forge limits how long one chain of queue events may be). Sending
+ * the event from here starts a new chain. The flag is cleared before the
+ * push, while no worker can be running, and put back if the push fails; the
+ * lock keeps two open tabs from sending the same event twice.
+ */
+async function resumePaused() {
+  try {
+    await withLock(
+      SCAN_KEY,
+      async () => {
+        const state = await getScanState();
+        if (state?.status !== 'running' || !state.paused) return;
+        await setScanState({ ...state, paused: false, pauseReason: null });
+        try {
+          await queue.push({ body: { run: state.run, seq: state.seq ?? 0 } });
+        } catch (err) {
+          await setScanState({ ...state, pauseReason: String(err?.message ?? err) });
+        }
+      },
+      { tries: 1 }
+    );
+  } catch (err) {
+    if (!err?.busy) throw err; // busy: another tab is doing it
+  }
+  return getScanState();
+}
+
 define('getStatus', async () => {
-  const [state, reviews] = await Promise.all([getScanState(), listReviews()]);
+  const [found, reviews] = await Promise.all([getScanState(), listReviews()]);
+  const state = found?.status === 'running' && found.paused ? await resumePaused() : found;
   return {
     ok: true,
     state: state ?? null,
@@ -156,13 +218,26 @@ define('getReview', async ({ payload }) => {
   const groups = await getReviewGroups(meta);
   const stored = await getReviewRowPages(meta.id, page * ROW_PAGES_PER_CALL, (page + 1) * ROW_PAGES_PER_CALL);
   const rows = await decorate(meta, groups, stored);
-  const names = await fetchUsersBulk([meta.startedBy, meta.completedBy, ...rows.map((r) => r.decidedBy)].filter(Boolean));
+  const history = signoffHistory(meta);
+  // People who were in the previous review and are not in this one are not
+  // among the rows, so their names are looked up here, with the first page.
+  const goneIds = page === 0 ? (meta.changes?.removed ?? []) : [];
+  const names = await fetchUsersBulk(
+    [meta.startedBy, meta.completedBy, ...history.flatMap((h) => [h.completedBy, h.reopenedBy]), ...rows.map((r) => r.decidedBy), ...goneIds].filter(Boolean)
+  );
   const name = (id) => (id ? (names[id]?.displayName ?? '(unknown)') : null);
-  const { groups: inline, ...rest } = meta;
+  const { groups: inline, ...rest } = withSignoffs(meta);
   return {
     ok: true,
     // The group table travels with the first page only; later pages are rows.
-    review: { ...rest, groups: page === 0 ? groups : [], startedByName: name(meta.startedBy), completedByName: name(meta.completedBy) },
+    review: {
+      ...rest,
+      groups: page === 0 ? groups : [],
+      startedByName: name(meta.startedBy),
+      completedByName: name(rest.completedBy),
+      signoffs: history.map((h) => ({ ...h, completedByName: name(h.completedBy), reopenedByName: name(h.reopenedBy) })),
+      gone: goneIds.map((id) => ({ accountId: id, displayName: name(id), email: names[id]?.email ?? null })),
+    },
     rows: rows.map((r) => ({ ...r, decidedByName: name(r.decidedBy) })),
     page,
     pages,
@@ -174,11 +249,11 @@ define('getReview', async ({ payload }) => {
 async function openReview(reviewId) {
   const meta = await getReviewMeta(String(reviewId ?? ''));
   if (!meta) return { error: 'That review was not found.' };
-  if (meta.status === 'complete') return { error: 'This review is signed off. Reopen it to change decisions.' };
+  if (meta.status === 'complete') return { error: SIGNED_OFF_MESSAGE };
   return { meta };
 }
 
-define('setDecision', async ({ payload, context }) => {
+define('setDecision', reportBusy(async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
   const { meta, error } = await openReview(payload?.reviewId);
@@ -189,52 +264,104 @@ define('setDecision', async ({ payload, context }) => {
   // Clearing the decision clears its note: the entry is removed as a whole.
   const note = decision ? normaliseNote(payload?.note) : '';
   const at = new Date().toISOString();
-  await setDecisions(meta, [{ accountId, decision, note, by: context?.accountId ?? null, at }]);
+  const saved = await setDecisions(meta, [{ accountId, decision, note, by: context?.accountId ?? null, at }]);
+  // A sign-off landed between the check above and the write: nothing was saved.
+  if (saved.signedOff) return { ok: false, error: SIGNED_OFF_MESSAGE };
   return { ok: true, decision, note, at };
-});
+}));
 
-define('setDecisionsBulk', async ({ payload, context }) => {
+define('setDecisionsBulk', reportBusy(async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const decision = normaliseDecision(payload?.decision);
   if (!decision) return { ok: false, error: 'No decision given.' };
-  const ids = [...new Set((payload?.accountIds ?? []).map(String))].slice(0, BULK_LIMIT);
+  // The page sends the review only and the rows are picked here, from
+  // storage: active, not in an admin group, activity checked. A list of
+  // accounts is still accepted from a page loaded before this version.
+  const picked = Array.isArray(payload?.accountIds)
+    ? payload.accountIds.map(String)
+    : (await getReviewRows(meta.id)).filter(isActiveNonAdmin).map((r) => r.accountId);
+  const ids = [...new Set(picked)].slice(0, BULK_LIMIT);
   if (!ids.length) return { ok: false, error: 'No users selected.' };
   const at = new Date().toISOString();
   // Bulk never overwrites a decision someone already made by hand.
-  const decided = await setDecisions(
+  const saved = await setDecisions(
     meta,
     ids.map((accountId) => ({ accountId, decision, note: '', by: context?.accountId ?? null, at })),
     { onlyUnset: true }
   );
-  return { ok: true, decided, skipped: ids.length - decided };
-});
+  if (saved.signedOff && !saved.count) return { ok: false, error: SIGNED_OFF_MESSAGE };
+  return { ok: true, decided: saved.count, skipped: ids.length - saved.count };
+}));
 
 // --- sign-off ------------------------------------------------------------------------------
 
-define('completeReview', async ({ payload, context }) => {
+define('completeReview', reportBusy(async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const rows = await getReviewRows(meta.id);
-  const stats = decisionStats(rows, await getDecisions(meta));
+  // The page sends the number of undecided people the admin saw in the
+  // dialog. If storage disagrees (rows still loading, a save that did not
+  // land, another admin at work), nothing is signed and the page reloads.
+  const expected = Number.isInteger(payload?.expectedUndecided) ? payload.expectedUndecided : null;
+  const differs = (stats) => expected !== null && stats.undecided !== expected;
+  const changed = (stats) => ({
+    ok: false,
+    changed: true,
+    stats,
+    error: `The review changed while you were looking at it: ${stats.undecided} of ${stats.total} are undecided now. Check the list and sign off again.`,
+  });
+  const before = decisionStats(rows, await getDecisions(meta));
+  if (differs(before)) return changed(before);
+
+  // Sign off first, then count again once every decision shard's lock has
+  // been passed. A save that was in flight has landed by then, and a later
+  // one sees the sign-off and writes nothing, so the totals are final.
   const at = new Date().toISOString();
-  const updated = await setReviewMeta(meta.id, { status: 'complete', completedAt: at, completedBy: context?.accountId ?? null, stats });
+  const signed = { status: 'complete', completedAt: at, completedBy: context?.accountId ?? null, signoffs: signoffHistory(meta) };
+  const unsign = () => setReviewMeta(meta.id, { status: 'open', completedAt: null, completedBy: null, stats: null });
+  await setReviewMeta(meta.id, { ...signed, stats: before });
+  let stats;
+  try {
+    stats = decisionStats(rows, await getDecisionsSettled(meta));
+  } catch (err) {
+    // The final count could not be taken: leave no sign-off that might not match.
+    await unsign();
+    throw err;
+  }
+  if (differs(stats)) {
+    await unsign();
+    return changed(stats);
+  }
+  const updated = await setReviewMeta(meta.id, { stats });
   return { ok: true, review: summaryOf(updated) };
-});
+}));
 
 define('reopenReview', async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
   const meta = await getReviewMeta(String(payload?.reviewId ?? ''));
   if (!meta) return { ok: false, error: 'That review was not found.' };
+  if (meta.status !== 'complete') return { ok: false, error: 'This review is not signed off.' };
+  // The sign-off moves into the history with who reopened it and when; the
+  // live fields are cleared so an open review never shows a sign-off.
+  const reopenedAt = new Date().toISOString();
+  const reopenedBy = context?.accountId ?? null;
   const updated = await setReviewMeta(meta.id, {
     status: 'open',
-    reopenedAt: new Date().toISOString(),
-    reopenedBy: context?.accountId ?? null,
+    signoffs: [
+      ...signoffHistory(meta),
+      { completedAt: meta.completedAt ?? null, completedBy: meta.completedBy ?? null, stats: meta.stats ?? null, reopenedAt, reopenedBy },
+    ],
+    completedAt: null,
+    completedBy: null,
+    stats: null,
+    reopenedAt,
+    reopenedBy,
   });
   return { ok: true, review: summaryOf(updated) };
 });
