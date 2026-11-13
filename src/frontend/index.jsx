@@ -82,7 +82,7 @@ function ReviewPrompt({ onHide }) {
             Write a review
           </Link>
           <Button appearance="subtle" onClick={onHide}>
-            Not now
+            No thanks
           </Button>
         </Inline>
       </Stack>
