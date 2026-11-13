@@ -157,8 +157,10 @@ and the four keywords above. Prices match the Pricing line above.
 - Scope table above: matches the manifest and the code. No change.
 - "Stores personal data" is answered No. The app keeps, in Forge hosted storage, the account IDs of
   the people in each review and of the admins who start, decide, sign off and reopen, and the notes
-  admins type about people. Atlassian's user privacy guide treats that as stored personal data and
-  asks for the personal data reporting API. Proposed answer: Yes, with this text (210):
+  admins type about people. Atlassian's user privacy guide says all apps that store personal data
+  must use the personal data reporting API; the notes are personal data on any reading, and the
+  10 November audit read the rule as covering stored account IDs too. Proposed answer: Yes, with
+  this text (210):
   `Account IDs of the people in each review and of the admins who decide and sign off, and the notes admins type. Kept in Forge hosted storage on Atlassian. Names and emails are read when shown and are not stored.`
   Change it together with the scope decision in `audit-2026-11-14.md` (finding A9), not before.
 
