@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakes, fakeSite, call, drain, refuse } from './fakes.js';
-import { handler as worker, NO_WORKLOG_WARNING } from '../src/worker.js';
+import { handler as worker, NO_WORKLOG_WARNING, SWEEP_TRUNCATED_WARNING } from '../src/worker.js';
 import { handler as resolver } from '../src/index.js';
 import { getScanState, setScanState, getReviewMeta, getReviewRows, getReviewGroups, getDecisions, listReviewIds } from '../src/lib/store.js';
 
@@ -350,4 +350,11 @@ test('a group deleted while the snapshot runs counts as empty', async () => {
   const rows = byId(await getReviewRows(run));
   assert.equal(rows['wiki-only'], undefined);
   assert.equal((await getReviewGroups(await getReviewMeta(run))).find((g) => g.id === 'g-conf').empty, true);
+});
+
+test('the warning for a sweep that stopped early matches the per-user check, which covers comments', () => {
+  // The per-user query includes updatedBy(), so a comment on an older issue is found.
+  assert.match(SWEEP_TRUNCATED_WARNING, /more than 20,000 issues/);
+  assert.match(SWEEP_TRUNCATED_WARNING, /nobody is shown as inactive because of this limit/);
+  assert.doesNotMatch(SWEEP_TRUNCATED_WARNING, /cannot search comments/);
 });

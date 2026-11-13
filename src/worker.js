@@ -62,8 +62,11 @@ const ISSUE_PAGE = 50;
 const MAX_ISSUE_PAGES = 400; // sweep ceiling; verify makes a partial sweep harmless
 const MAX_TRANSIENT_RETRIES = 6;
 
+const SWEEP_LIMIT = (MAX_ISSUE_PAGES * ISSUE_PAGE).toLocaleString('en-US');
+// The per-user check uses updatedBy(), which covers comments, so a sweep that
+// stopped early costs nobody their "active": only the "last seen" date.
 export const SWEEP_TRUNCATED_WARNING =
-  `This site had more than ${MAX_ISSUE_PAGES * ISSUE_PAGE} issues updated in the window, so the activity sweep stopped at the most recent ${MAX_ISSUE_PAGES * ISSUE_PAGE}. Every user was still checked individually, but Jira cannot search comments by author, so someone whose only activity was a comment on an older issue may show as inactive.`;
+  `This site had more than ${SWEEP_LIMIT} issues updated in the window, so the first pass read the ${SWEEP_LIMIT} most recently updated. Everyone it did not find there was then checked one by one against all issues the app can see, so nobody is shown as inactive because of this limit. People found only by that second check show as Active with no "last seen" date.`;
 export const NO_ROLES_WARNING =
   'Application roles were not readable, so the review cannot say which Jira product each group grants. Group membership and activity are still complete.';
 export const NO_WORKLOG_WARNING =
