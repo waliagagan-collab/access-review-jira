@@ -1043,7 +1043,13 @@ const App = () => {
     <Stack space="space.200">
       {!gate.allowed && (
         <SectionMessage appearance="warning" title="Subscription needed">
-          <Text>{licenseMessage(gate, ctx?.license)}</Text>
+          <Stack space="space.100">
+            <Text>{licenseMessage(gate, ctx?.license)}</Text>
+            <Text>
+              You can still open your reviews, download the evidence files and delete reviews. Starting a review,
+              decisions, sign-off and reopening need a subscription.
+            </Text>
+          </Stack>
         </SectionMessage>
       )}
       {trialEnds && (

@@ -47,6 +47,10 @@ test('without a licence in production, nothing can be changed', async () => {
     assert.equal(res.unlicensed, true, key);
   }
   assert.equal((await call(handler, 'getReview', { reviewId: '1000' }, unlicensed)).ok, true, 'reading stays open');
+  // The page says so: reviews can still be listed, opened (and so downloaded) and deleted.
+  assert.equal((await call(handler, 'getStatus', {}, unlicensed)).reviews.length, 1, 'the list stays open');
+  assert.equal((await call(handler, 'deleteReview', { reviewId: '1000' }, unlicensed)).ok, true, 'deleting stays open');
+  assert.equal(await getReviewMeta('1000'), undefined);
 });
 
 // --- decisions and sign-off -----------------------------------------------------------
