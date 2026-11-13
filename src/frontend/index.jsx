@@ -729,6 +729,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                   placeholder="e.g. Contractor, contract ends 31 Dec"
                   onChange={(e) => setNoteText(e?.target?.value ?? '')}
                 />
+                {!noteFor.decision && <Text size="small">This person has no decision yet. Saving a note marks them Follow up.</Text>}
               </Stack>
             </ModalBody>
             <ModalFooter>
