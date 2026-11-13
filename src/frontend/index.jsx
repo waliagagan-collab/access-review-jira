@@ -108,10 +108,11 @@ const HowItWorks = ({ compact, onToggle }) =>
       <Stack space="space.100">
         <Text>
           <Strong>Start a review</Strong> and the app takes a snapshot of the site: every group (including empty ones),
-          who is in it, which Jira product each group grants, who holds an admin group, and whether each person did
-          anything in Jira in the window: created an issue, changed a status or field, commented or logged work.
-          Every candidate is checked against all issues the app can see, not a sample. Admin groups are recognised
-          by name. Products other than Jira are not read, so a group that only grants Confluence shows no product.
+          who is in it, which Jira product each group grants, who is in an admin group, and whether each person did
+          anything in Jira in the window: created an issue, changed a status or field, commented or logged work. A
+          person is shown as inactive only after a search of all issues the app can see finds nothing they did in the
+          window. Admin groups are recognised by name. Products other than Jira are not read, so a group that only
+          grants Confluence shows no product.
         </Text>
         <Text>
           Then review: mark each person <Strong>Keep</Strong>, <Strong>Remove</Strong> or <Strong>Follow up</Strong>,
