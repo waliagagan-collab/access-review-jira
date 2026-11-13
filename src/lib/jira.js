@@ -37,7 +37,7 @@ function explain(status, body) {
     ? ` — ${body.errorMessages.join('; ')}`
     : '';
   if (status === 401 || status === 403) {
-    return `Jira refused the request (${status}). The app is probably missing a permission it was granted after install — reinstalling it re-grants the current scopes.${detail}`;
+    return `Jira refused the request (${status}). The app may be waiting for an update to be approved: open Jira → Apps → Manage apps, update Access Review if an update is offered, then start the review again.${detail}`;
   }
   if (status === 400) return `Jira rejected the query (400)${detail}`;
   return `Jira returned ${status}${detail}`;
