@@ -122,8 +122,8 @@ const HowItWorks = ({ compact, onToggle }) =>
           them.
         </Text>
         <Text>
-          The app never changes anything. To act on the Remove list, use Atlassian Administration, or Seat Reclaim for
-          Jira, which removes access with an undo.
+          The app never changes anything. To act on the Remove list, use Atlassian Administration. For inactive users
+          who are not admins, Seat Reclaim for Jira frees their seats after you confirm, with an undo.
         </Text>
         {onToggle && (
           <Box>

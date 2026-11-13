@@ -12,7 +12,18 @@ admin group and who gained a Jira product; its Changes sheet names them.
 that only grants Confluence shows no product, and its members show "No Jira product access".
 
 Read-only: there is no write scope, so the platform itself prevents the app from changing
-anything. To act on the Remove list, use Atlassian Administration or Seat Reclaim for Jira.
+anything. To act on the Remove list, use Atlassian Administration. Seat Reclaim for Jira can
+free the seats of the people on it who are inactive and not admins; it does not read this
+app's list.
+
+## Without a licence
+
+The app is paid through Atlassian and free for up to 10 users. In production, when the
+licence is missing or not active, `startReview`, `setDecision`, `setDecisionsBulk`,
+`completeReview` and `reopenReview` are refused by the resolvers, and the page greys those
+buttons out and says why. Listing and opening reviews, the evidence download and deleting a
+review keep working, so a customer whose subscription has ended can still take or remove
+what the app holds. Development and staging installs are never blocked.
 
 ## How the snapshot is built
 
