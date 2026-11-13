@@ -1,76 +1,72 @@
-"""Access Review logo and banners, in the License Audit family: navy tile, nine
-seats, one seat checked off (a green tick instead of Seat Reclaim's arrow).
-Run: python3 build_assets.py  (writes PNGs next to this file)"""
-import math, os
+"""Access Review banners, in the same family as the other TELCOMA apps: navy, the app icon on the
+left, the name and two lines on the right, a short line in the Jira blue.
+
+The icon is logo-1024.png in this folder: the shield with a check mark that is on the Marketplace
+(a copy of app-icons/png/access-review-jira-1024.png; logo-144 and logo-512 are copies too).
+Run: python3 build_assets.py  (needs Pillow; writes the two banners next to this file)"""
+import os
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAVY = (11, 34, 57)
 WHITE = (255, 255, 255)
-GREEN = (34, 160, 107)
-MINT = (126, 226, 184)
-S = 4  # supersampling
+GREY = (214, 222, 232)
+MUTED = (150, 170, 192)
+BLUE = (35, 70, 224)  # TELCOMA blue, used for the Jira apps
+LIGHT = (150, 180, 255)
+S = 2  # supersampling
 
-
-def arrow_seat(d, cx, cy, r, w):
-    """A seat with a tick: reviewed and signed off."""
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=GREEN)
-    p1 = (cx - r * 0.45, cy + r * 0.02)
-    p2 = (cx - r * 0.12, cy + r * 0.38)
-    p3 = (cx + r * 0.5, cy - r * 0.38)
-    d.line([p1, p2, p3], fill=WHITE, width=int(w * 1.4), joint='curve')
-
-
-def grid(d, x0, y0, step, dot, arrow_r, arrow_w):
-    for row in range(3):
-        for col in range(3):
-            cx, cy = x0 + col * step, y0 + row * step
-            if (row, col) == (1, 2):
-                arrow_seat(d, cx, cy, arrow_r, arrow_w)
-            else:
-                d.ellipse((cx - dot, cy - dot, cx + dot, cy + dot), fill=WHITE)
-
-
-def logo(size):
-    n = size * S
-    im = Image.new('RGBA', (n, n), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.rounded_rectangle((0, 0, n - 1, n - 1), radius=int(n * 0.2), fill=NAVY)
-    step = n * 0.31
-    grid(d, n * 0.19, n * 0.19, step, n * 0.085, n * 0.135, int(n * 0.034))
-    return im.resize((size, size), Image.LANCZOS)
+TITLE = 'Access Review'
+PRODUCT = 'for Jira'
+LINES = ['Who has access, reviewed and signed off.', 'Evidence for SOC 2 and ISO 27001.']
+FOOTER = 'READ-ONLY  ·  RUNS ON ATLASSIAN  ·  NO EXTERNAL SERVERS'
 
 
 def font(bold, px):
-    names = ['Arial Bold.ttf', 'Arial.ttf'] if bold else ['Arial.ttf']
-    for name in names:
+    for name in (['Arial Bold.ttf'] if bold else []) + ['Arial.ttf']:
         p = f'/System/Library/Fonts/Supplemental/{name}'
         if os.path.exists(p):
             return ImageFont.truetype(p, px)
     return ImageFont.load_default()
 
 
+def fitted(d, lines, bold, px, room):
+    """The font at px, made smaller until the widest line fits in room."""
+    while px > 10:
+        f = font(bold, px)
+        if max(d.textlength(t, font=f) for t in lines) <= room:
+            return f
+        px -= 1
+    return font(bold, px)
+
+
 def banner(w, h):
     n_w, n_h = w * S, h * S
     im = Image.new('RGB', (n_w, n_h), NAVY)
     d = ImageDraw.Draw(im)
-    for x in range(-n_h, n_w, 9 * S):  # faint diagonal texture, as on License Audit
+    for x in range(-n_h, n_w, 9 * S):  # faint diagonal texture
         d.line((x, n_h, x + n_h, 0), fill=(16, 41, 66), width=S)
-    u = n_h / 548  # layout unit relative to the 1120x548 design
-    gx = n_w * 0.148 if w / h > 1.8 else n_w * 0.12
-    grid(d, gx, n_h / 2 - 93 * u, 93 * u, 26 * u, 41 * u, int(8 * u))
-    tx = n_w * 0.42
-    d.text((tx, n_h * 0.27), 'Access Review', font=font(True, int(72 * u)), fill=WHITE)
-    d.text((tx, n_h * 0.42), 'for Jira', font=font(False, int(42 * u)), fill=MINT)
-    d.text((tx, n_h * 0.57), 'Who has access, reviewed and signed off.', font=font(False, int(28 * u)), fill=(214, 222, 232))
-    d.text((tx, n_h * 0.655), 'Evidence for SOC 2 and ISO 27001.', font=font(False, int(28 * u)), fill=(214, 222, 232))
-    d.rectangle((tx, n_h * 0.75, tx + 72 * u, n_h * 0.75 + 5 * u), fill=GREEN)
-    d.text((tx, n_h * 0.79), 'READ-ONLY  ·  RUNS ON ATLASSIAN  ·  NO EXTERNAL SERVERS', font=font(False, int(16 * u)), fill=(150, 170, 192))
+    # The 1920x1200 banner is taller than the 1120x548 design, so scale by width there:
+    # scaled by height alone, the text ran off the right edge.
+    u = min(n_h / 548, n_w / 1120)
+    size = int(250 * u)
+    icon = Image.open(os.path.join(HERE, 'logo-1024.png')).convert('RGBA').resize((size, size), Image.LANCZOS)
+    gx = int(n_w * 0.11)
+    im.paste(icon, (gx, int(n_h / 2 - size / 2)), icon)
+    tx = gx + size + int(70 * u)
+    room = n_w - tx - int(56 * u)
+    y = n_h * 0.31
+    d.text((tx, y), TITLE, font=fitted(d, [TITLE], True, int(60 * u), room), fill=WHITE)
+    y += n_h * 0.12
+    d.text((tx, y + n_h * 0.005), PRODUCT, font=fitted(d, [PRODUCT], False, int(38 * u), room), fill=LIGHT)
+    lf = fitted(d, LINES, False, int(27 * u), room)
+    d.text((tx, n_h * 0.61), LINES[0], font=lf, fill=GREY)
+    d.text((tx, n_h * 0.67), LINES[1], font=lf, fill=GREY)
+    d.rectangle((tx, n_h * 0.76, tx + 72 * u, n_h * 0.76 + 5 * u), fill=BLUE)
+    d.text((tx, n_h * 0.80), FOOTER, font=fitted(d, [FOOTER], False, int(16 * u), room), fill=MUTED)
     return im.resize((w, h), Image.LANCZOS)
 
 
-for size in (144, 512, 1024):
-    logo(size).save(os.path.join(HERE, f'logo-{size}.png'))
 banner(1120, 548).save(os.path.join(HERE, 'banner-1120x548.png'))
 banner(1920, 1200).save(os.path.join(HERE, 'banner-1920x1200.png'))
 print('done')
