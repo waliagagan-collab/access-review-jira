@@ -60,6 +60,7 @@ test('the page sends decisions one at a time and lets the server pick and count'
   assert.ok(ui.includes('expectedUndecided: liveStats.undecided'), 'sign-off sends the count the admin saw');
   assert.ok(/onClick=\{\(\) => setConfirmOpen\(true\)\} isDisabled=\{busy \|\| loading \|\|/.test(ui), 'no sign-off while rows are loading');
   assert.ok(ui.includes("invoke('cancelScan')"), 'a running snapshot can be cancelled');
+  assert.ok(ui.includes('gained a Jira product') && !ui.includes('gained a product'), 'the changes line says Jira product, as the rest of the page does');
   assert.ok(ui.includes('setStatusError(true)') && ui.includes('Could not load your reviews'), 'a failed status call is shown, not hidden');
 });
 

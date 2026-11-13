@@ -499,8 +499,11 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
             <SectionMessage appearance="information" title={`Since the review signed off on ${fmtDate(review.previousCompletedAt)}`}>
               <Text>
                 {plural(changes.counts.added, 'user', 'users')} added · {changes.counts.removed} gone ·{' '}
-                {plural(changes.counts.becameAdmin, 'new admin', 'new admins')} · {changes.counts.gainedProducts} gained a product.
-                {changes.counts.added ? ' Filter the list by "New since previous review" to see who.' : ''}
+                {changes.counts.becameAdmin} joined an admin group · {changes.counts.gainedProducts} gained a Jira product.
+                {changes.counts.added || changes.counts.removed || changes.counts.becameAdmin || changes.counts.gainedProducts
+                  ? ' The Changes sheet of the Excel file names them.'
+                  : ''}
+                {changes.counts.added ? ' To see the added users here, filter the list by "New since previous review".' : ''}
               </Text>
             </SectionMessage>
           )}
