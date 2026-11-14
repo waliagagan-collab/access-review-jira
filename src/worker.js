@@ -591,6 +591,8 @@ async function doFinalize(state) {
     status: 'open',
     startedAt: state.startedAt,
     startedBy: state.startedBy ?? null,
+    // The personal data report cleared the starter while this ran: their account was closed.
+    ...(state.startedByClosed && !state.startedBy ? { startedByClosed: true } : {}),
     days: state.days,
     generatedAt: new Date().toISOString(),
     counts: {

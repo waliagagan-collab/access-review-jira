@@ -38,6 +38,19 @@ export const normaliseNote = (n) => String(n ?? '').trim().slice(0, MAX_NOTE);
 export const NOT_CHECKED = 'Not checked';
 
 /**
+ * A person whose Atlassian account was closed. The weekly personal data
+ * report (lib/personal-data.js) replaces their account ID in a review with a
+ * marker that holds only where their row is in the review (`~closed:2.17` is
+ * page 2, row 17), so every row stays its own and keeps its decision. An
+ * account ID never starts with `~`.
+ */
+export const CLOSED_PREFIX = '~closed:';
+export const closedMarker = (page, index) => `${CLOSED_PREFIX}${page}.${index}`;
+export const isClosedAccount = (id) => typeof id === 'string' && id.startsWith(CLOSED_PREFIX);
+/** What the page and the evidence file show for that person, and for an admin whose account was closed. */
+export const CLOSED_ACCOUNT_NAME = 'Closed account';
+
+/**
  * Pure: a user record from the scan -> a review row.
  *   groupsAll  - { groupId -> { name, products, admin } } for every group on the site
  *   activity   - { active: boolean, at?: ISO string, bucket?, label?, severity?, unchecked? }

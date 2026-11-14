@@ -20,6 +20,7 @@ import {
   deleteReview,
   getSettings,
   saveSettings,
+  markActionStarted,
 } from './lib/store.js';
 import { fetchUsersBulk } from './lib/jira.js';
 import { adminOnly } from './lib/admin.js';
@@ -61,6 +62,13 @@ const summaryOf = (m) => {
 const SIGNED_OFF_MESSAGE = 'This review is signed off. Reopen it to change decisions.';
 const BUSY_MESSAGE = 'Another change to this review is being saved. Try again in a moment.';
 
+/**
+ * The weekly personal data report does not erase while this change may still
+ * be running (busy in lib/personal-data.js). A note that cannot be written
+ * only means the report does not wait.
+ */
+const noteStarted = () => markActionStarted().catch(() => {});
+
 /** A save that could not get its turn in time is reported, not thrown. */
 const reportBusy = (fn) => async (request) => {
   try {
@@ -78,6 +86,7 @@ define('startReview', async ({ payload, context }) => {
   // paid-app check is enforced here as well. Non-production is never blocked.
   const refused = licenseRefusal(context);
   if (refused) return refused;
+  await noteStarted();
 
   const days = normaliseDays(payload?.days);
 
@@ -132,6 +141,7 @@ define('startReview', async ({ payload, context }) => {
 });
 
 define('cancelScan', async () => {
+  await noteStarted();
   const state = await getScanState();
   if (state?.status === 'running') {
     await setScanState({ ...state, status: 'cancelled', paused: false, finishedAt: new Date().toISOString() });
@@ -273,6 +283,7 @@ define('setDecision', reportBusy(async ({ payload, context }) => {
 define('setDecisionsBulk', reportBusy(async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
+  await noteStarted();
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const decision = normaliseDecision(payload?.decision);
@@ -301,6 +312,7 @@ define('setDecisionsBulk', reportBusy(async ({ payload, context }) => {
 define('completeReview', reportBusy(async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
+  await noteStarted();
   const { meta, error } = await openReview(payload?.reviewId);
   if (error) return { ok: false, error };
   const rows = await getReviewRows(meta.id);
@@ -344,6 +356,7 @@ define('completeReview', reportBusy(async ({ payload, context }) => {
 define('reopenReview', async ({ payload, context }) => {
   const refused = licenseRefusal(context);
   if (refused) return refused;
+  await noteStarted();
   const meta = await getReviewMeta(String(payload?.reviewId ?? ''));
   if (!meta) return { ok: false, error: 'That review was not found.' };
   if (meta.status !== 'complete') return { ok: false, error: 'This review is not signed off.' };
@@ -369,6 +382,7 @@ define('reopenReview', async ({ payload, context }) => {
 // Deleting is never licence-gated: a customer whose subscription has ended
 // can still remove what the app holds.
 define('deleteReview', async ({ payload }) => {
+  await noteStarted();
   const id = String(payload?.reviewId ?? '');
   if (!(await getReviewMeta(id))) return { ok: false, error: 'That review was not found.' };
   await deleteReview(id);

@@ -231,10 +231,10 @@ export async function clearRun(run, groupPages = 0, grantPages = 0) {
 
 const REVIEWS_INDEX = 'reviews:index';
 export const KEEP_REVIEWS = 12;
-const metaKey = (id) => `review:${id}:meta`;
-const rowsKey = (id, i) => `review:${id}:rows:${i}`;
+export const metaKey = (id) => `review:${id}:meta`;
+export const rowsKey = (id, i) => `review:${id}:rows:${i}`;
 const groupsKey = (id, i) => `review:${id}:groups:${i}`;
-const decisionsKey = (id, s) => `review:${id}:decisions:${s}`;
+export const decisionsKey = (id, s) => `review:${id}:decisions:${s}`;
 
 export const listReviewIds = async () => (await kv.get(REVIEWS_INDEX)) ?? [];
 
@@ -387,6 +387,20 @@ export async function setDecisions(meta, entries, { onlyUnset = false } = {}) {
   });
   return { count: written.reduce((a, b) => a + b, 0), signedOff };
 }
+
+// ---------------------------------------------------------------------------
+// When a change the personal data report must not cross last started: a
+// snapshot started or cancelled, a bulk decision, a sign-off, a reopen or a
+// delete. Only the time, no account: the weekly report does not erase while
+// one may still be running (busy in personal-data.js), since each writes from
+// what it read a moment before. Single decisions need no note: they are
+// written under their shard's lock, which erasing takes too.
+// ---------------------------------------------------------------------------
+
+export const ACTION_KEY = 'action:started';
+
+export const markActionStarted = () => kv.set(ACTION_KEY, { at: new Date().toISOString() });
+export const getActionStarted = () => kv.get(ACTION_KEY);
 
 // ---------------------------------------------------------------------------
 // Settings

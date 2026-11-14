@@ -14,11 +14,14 @@ import { TIMING } from '../src/lib/store.js';
  *             failPush = Error makes queue pushes fail; admin = false makes
  *             the caller a non-admin
  *   jira    - (path) => response, set per test
+ *   writes  - every [key, value] handed to kvs.set, in order
+ *   reported, closed - the accounts handed to privacy.reportPersonalData, and
+ *             the account IDs it answers as closed
  */
 export function installFakes() {
   const data = new Map();
   const pushed = [];
-  const hooks = { beforeGet: null, beforeSet: null, failStorage: 0, failPush: null, admin: true, jira: null, calls: [] };
+  const hooks = { beforeGet: null, beforeSet: null, failStorage: 0, failPush: null, admin: true, jira: null, calls: [], writes: [], reported: [], closed: [] };
   const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
   // Every storage call yields once, so calls made side by side interleave.
   const turn = () => new Promise((resolve) => setImmediate(resolve));
@@ -44,12 +47,39 @@ export function installFakes() {
       err.responseDetails = { status: 409 };
       throw err;
     }
+    hooks.writes.push([key, clone(value)]);
     data.set(key, clone(value));
   };
   kvs.delete = async (key) => {
     await turn();
     maybeFail();
     data.delete(key);
+  };
+  // Key prefix queries in key order, page by page, as the personal data report walks the store.
+  kvs.query = () => {
+    const q = {};
+    const builder = {
+      where: (field, clause) => ((q.prefix = String(clause?.values?.[0] ?? '')), builder),
+      limit: (n) => ((q.limit = n), builder),
+      cursor: (c) => ((q.cursor = c), builder),
+      async getMany() {
+        await turn();
+        maybeFail();
+        const keys = [...data.keys()].filter((k) => k.startsWith(q.prefix ?? '') && (!q.cursor || k > q.cursor)).sort();
+        const page = keys.slice(0, q.limit ?? 10);
+        return {
+          results: page.map((key) => ({ key, value: clone(data.get(key)) })),
+          ...(keys.length > page.length ? { nextCursor: page.at(-1) } : {}),
+        };
+      },
+    };
+    return builder;
+  };
+  // privacy.reportPersonalData: every call's accounts are kept in
+  // hooks.reported; those listed in hooks.closed are answered as closed.
+  api.privacy.reportPersonalData = async (accounts) => {
+    hooks.reported.push(...accounts);
+    return accounts.filter((a) => hooks.closed.includes(a.accountId)).map((a) => ({ accountId: a.accountId, status: 'closed' }));
   };
 
   Queue.prototype.push = async function push(event) {
