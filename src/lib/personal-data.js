@@ -259,7 +259,7 @@ export function scanLive(state, at = Date.now()) {
   return Number.isFinite(moved) && at - moved <= STALE_AFTER_MS;
 }
 
-/** A sign-off, a reopen, a bulk decision or a delete is one resolver call, which Forge stops after 25 seconds. */
+/** Each change that notes when it started (markActionStarted) is one resolver call, which Forge stops after 25 seconds. */
 export const ACTION_LIVE_MS = 60_000;
 
 /** Pure: may a change that started at `mark.at` still be running? */
@@ -279,7 +279,7 @@ export async function busy(readScan = getScanState, readAction = getActionStarte
   return scanLive(scan, at) || actionLive(action, at);
 }
 
-export const BUSY_MESSAGE = 'A snapshot, a sign-off, a reopen, a bulk decision or a delete started while closed accounts were being erased; erasing goes on at the next run.';
+export const BUSY_MESSAGE = 'A snapshot or a change to a review started while closed accounts were being erased; erasing goes on at the next run.';
 
 // --- the sources --------------------------------------------------------------------
 
