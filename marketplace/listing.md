@@ -170,3 +170,18 @@ and the four keywords above. Prices match the Pricing line above.
 - Summary draft: do not use ("each person's last activity").
 - Family link draft ("To act on the Remove list, Seat Reclaim for Jira frees those seats…"): do not use; see More details above.
 - Images `ar-1` to `ar-4`: do not upload; `ar-5-past.png` can be used. Reasons in `audit-2026-11-14.md`.
+
+---
+
+## Personal data reporting (14 Nov 2026)
+
+The app now reports the account IDs it keeps to Atlassian once a week and erases those of closed accounts (scope `report:personal-data`, hourly scheduled trigger; details in the README and in `privacy-security.md`). This settles finding A9 of the 14 Nov audit. Deployed to development only. Nothing below has been entered on the Marketplace.
+
+- **The next production deploy is a major version.** The new scope makes it one (Forge lint: "major version upgrade ... scope modification"). Customers approve the new scope when they update. Make the Marketplace version for that major version after the deploy.
+- **Privacy & Security tab:**
+  - "Does your app store personal data?": **Yes** (it stores Atlassian account IDs and the notes admins type about people), and tick the Personal Data Reporting API acknowledgment: the app calls it. The public API reported "Stores personal data: No" on 14 Nov.
+  - "Data stored" and the data residency answer for in-scope End-User Data: use the paragraph under "Data stored" in `privacy-security.md`. It replaces the shorter text proposed above under "Privacy & Security tab", and adds the lists of changes, the snapshot's working data and the weekly report.
+  - Scope list: the new line for `report:personal-data` is at the end of `privacy-security.md` (it shows only at submit time for the new version).
+- **Suggested release summary (55/80):** Weekly personal data report: closed accounts are erased
+- **Suggested release notes:** Once a week the app reports the account IDs it keeps to Atlassian and erases those of accounts that were closed. Reviews keep the person's row and decision, shown as "Closed account", without the account ID or any note about them; an admin whose account was closed shows as "Closed account". Totals stay; the next snapshot counts again. New permission: report personal data.
+- **Website:** the privacy page needs the matching text at the next website deploy: the weekly report and its permission, and that closed accounts are erased from kept reviews (the row and decision stay). The L11 sentence about deleting older reviews is still to fix as well.
