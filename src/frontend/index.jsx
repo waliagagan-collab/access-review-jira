@@ -31,7 +31,7 @@ import ForgeReconciler, {
 import { invoke, view, events } from '@forge/bridge';
 import { licenseGate, licenseMessage } from '../lib/scan.js';
 import { scanProgress, showReviewPrompt, utcDay, utcStamp, OPEN_REVIEW_EVENT, FRAME_READY_EVENT } from '../lib/ui.js';
-import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName, isActiveNonAdmin } from '../lib/review.js';
+import { DECISIONS, DECISION_WORDS, MAX_NOTE, decisionStats, filterReviewRows, quarterName, isActiveNonAdmin, isClosedAccount } from '../lib/review.js';
 
 const REVIEW_URL = 'https://marketplace.atlassian.com/apps/285025617?tab=reviews';
 
@@ -606,6 +606,9 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                         {r.becameAdmin && <Lozenge appearance="moved">New admin</Lozenge>}
                       </Inline>
                       {r.email && <Text size="small">{r.email}</Text>}
+                      {isClosedAccount(r.accountId) && (
+                        <Text size="small">Atlassian account closed. Its account ID and any note were erased.</Text>
+                      )}
                     </Stack>
                   ),
                 },
@@ -657,9 +660,12 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
                             {DECISION_WORDS[d]}
                           </Button>
                         ))}
-                        <Button spacing="compact" appearance="subtle" onClick={() => openNote(r)} isDisabled={!gate.allowed}>
-                          {r.note ? 'Note ✓' : 'Note'}
-                        </Button>
+                        {/* A closed account takes no note: what admins wrote about the person was erased. */}
+                        {!isClosedAccount(r.accountId) && (
+                          <Button spacing="compact" appearance="subtle" onClick={() => openNote(r)} isDisabled={!gate.allowed}>
+                            {r.note ? 'Note ✓' : 'Note'}
+                          </Button>
+                        )}
                       </Inline>
                       {r.note && <Text size="small">{r.note}</Text>}
                     </Stack>

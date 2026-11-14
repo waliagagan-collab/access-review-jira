@@ -7,7 +7,8 @@ import { installFakes, fakeSite, call, drain, refuse } from './fakes.js';
 import { handler as worker } from '../src/worker.js';
 import { handler as resolver } from '../src/index.js';
 import { getScanState, getReviewMeta, getReviewRows, getDecisions, shardOf, decisionsKey } from '../src/lib/store.js';
-import { closedMarker, isClosedAccount } from '../src/lib/review.js';
+import { closedMarker, isClosedAccount, decisionStats } from '../src/lib/review.js';
+import { sheetsOf } from '../src/frame/evidence.js';
 import { runSlice, kvsStore } from '../src/lib/privacy.js';
 import * as personal from '../src/lib/personal-data.js';
 import { scheduled } from '../src/privacy.js';
@@ -310,6 +311,106 @@ test('closed accounts are erased everywhere; rows, decisions and totals stay und
   assert.match(state.error, /The value '\(closed account\)' does not exist for the field 'worklogAuthor'\./);
   assert.deepEqual(data.get('settings'), before.settings);
   assert.deepEqual(data.get('reviews:index'), before.index);
+});
+
+test('after the report, the page, the evidence file, Past reviews and the next snapshot read the markers sensibly', async () => {
+  reset();
+  const { first, second } = await buildSite();
+  actionsOver();
+  const firstRows = await getReviewRows(first);
+  const marker = markersOf(firstRows);
+  const secondMarker = markersOf(await getReviewRows(second));
+  const signed = await getReviewMeta(first);
+  hooks.closed.push(...CLOSED);
+  await runReport();
+  hooks.calls.length = 0;
+
+  // The page: every row, the closed ones as "Closed account" with no email and no note; who did what.
+  const page = await act('getReview', { reviewId: first, page: 0 }, OTHER_ADMIN);
+  assert.equal(page.rows.length, firstRows.length);
+  assert.equal(new Set(page.rows.map((r) => r.accountId)).size, firstRows.length, 'every row has its own key');
+  const rows = byId(page.rows);
+  for (const id of [ALICE, DAN, ADMIN]) {
+    assert.equal(rows[marker[id]].displayName, 'Closed account');
+    assert.equal(rows[marker[id]].email, null);
+    assert.equal(rows[marker[id]].note, '');
+  }
+  assert.equal(rows[marker[ALICE]].decision, 'remove');
+  assert.equal(rows[marker[ALICE]].decidedByName, 'Closed account', 'decided by the admin whose account was closed');
+  assert.equal(rows[marker[ADMIN]].decidedByName, `Name of ${OTHER_ADMIN}`);
+  assert.equal(rows[BOB].displayName, `Name of ${BOB}`);
+  assert.equal(rows[BOB].note, 'Covers for (closed account)');
+  assert.equal(rows[BOB].decidedByName, 'Closed account');
+  assert.equal(page.review.startedByName, 'Closed account');
+  assert.equal(page.review.completedByName, `Name of ${OTHER_ADMIN}`);
+  assert.deepEqual(page.review.signoffs.map((h) => [h.completedByName, h.reopenedByName]), [['Closed account', 'Closed account']]);
+  assert.deepEqual(page.review.stats, signed.stats, 'the totals signed off stay');
+  assert.ok(hooks.calls.length > 0);
+  assert.ok(!hooks.calls.some((p) => decodeURIComponent(p).includes('~closed')), 'Jira is never asked about a marker');
+
+  // The evidence file, all four sheets.
+  const stats = decisionStats(page.rows, Object.fromEntries(page.rows.map((r) => [r.accountId, { decision: r.decision }])));
+  assert.deepEqual(stats, signed.stats);
+  const [summary, users, groups, changes] = sheetsOf(page.review, page.rows, stats).map((s) => s.table);
+  const cell = (table, label) => table.find((r) => r[0] === label)?.[1];
+  assert.equal(cell(summary, 'Started by'), 'Closed account');
+  assert.equal(cell(summary, 'Signed off by'), `Name of ${OTHER_ADMIN}`);
+  assert.match(cell(summary, 'Earlier sign-off 1'), /by Closed account \(.*\)\. Reopened .* by Closed account\./);
+  assert.equal(cell(summary, 'Users reviewed'), firstRows.length);
+  assert.equal(cell(summary, 'Users whose Atlassian account was closed since the snapshot'), 3);
+  const head = users[0];
+  const alice = Object.fromEntries(head.map((h, i) => [h, users.find((r) => r[8] === '' && r[7] === 'Remove')[i]]));
+  assert.equal(alice['Display name'], 'Closed account');
+  assert.equal(alice.Email, '');
+  assert.equal(alice['Account ID'], '');
+  assert.equal(alice.Note, '');
+  assert.equal(alice['Decided by'], 'Closed account');
+  assert.equal(users.length, firstRows.length + 1);
+  assert.ok(!JSON.stringify(users).includes('~closed'), 'the marker itself is never shown');
+  assert.ok(groups.length > 1);
+  assert.equal(changes[1][0], 'No earlier signed-off review to compare with');
+
+  // The open review's Changes sheet: Eve was added and is a closed account now; Dan, gone, is no longer named.
+  const open = await act('getReview', { reviewId: second, page: 0 }, OTHER_ADMIN);
+  const openChanges = sheetsOf(open.review, open.rows, {})[3].table;
+  assert.deepEqual(openChanges.filter((r) => r[0] === 'Gone'), [['Gone', '', '', '', '1 more not listed: over the 500 kept, or their Atlassian account was closed']]);
+  assert.deepEqual(openChanges.filter((r) => r[0] === 'Added'), [['Added', 'Closed account', '', '', 'Not in the previous review']]);
+  assert.deepEqual(openChanges.slice(1).filter((r) => r[0] !== 'Gone' && r[0] !== 'Added').map((r) => [r[0], r[1]]), [
+    ['Gained a Jira product', `Name of ${CAROL}`],
+    ['Joined an admin group (by name)', `Name of ${CAROL}`],
+  ]);
+  assert.deepEqual(open.review.changes.counts, { added: 1, removed: 1, becameAdmin: 1, gainedProducts: 1 }, 'the counts shown stay');
+
+  // A closed row in an open review can still be decided, without a note; the decision is one entry, on its marker.
+  const eve = secondMarker[EVE];
+  const decided = await act('setDecision', { reviewId: second, accountId: eve, decision: 'remove', note: 'Gone in May' }, OTHER_ADMIN);
+  assert.equal(decided.note, '');
+  assert.deepEqual((await getDecisions(await getReviewMeta(second)))[eve], { decision: 'remove', note: '', by: OTHER_ADMIN, at: decided.at });
+  const holders = [...data.entries()].filter(([k, v]) => /^review:\d+:decisions:\d+$/.test(k) && k.startsWith(`review:${second}:`) && v?.[eve]);
+  assert.equal(holders.length, 1);
+  // "Keep all active non-admins" leaves closed accounts alone.
+  await act('setDecision', { reviewId: second, accountId: eve, decision: null }, OTHER_ADMIN);
+  await act('setDecisionsBulk', { reviewId: second, decision: 'keep' }, OTHER_ADMIN);
+  const bulk = await getDecisions(await getReviewMeta(second));
+  assert.equal(bulk[eve], undefined);
+  assert.equal(bulk[BOB].decision, 'keep');
+
+  // Past reviews: the list reads the records as they are.
+  const status = await act('getStatus', {}, OTHER_ADMIN);
+  assert.deepEqual(status.reviews.map((r) => r.id), [second, first]);
+  assert.deepEqual(status.reviews[1].stats, signed.stats);
+  assert.equal(status.reviews[1].startedBy, null);
+
+  // The next snapshot compares with the signed-off review: a marker is neither someone who left nor who joined.
+  members.jsw = [OTHER_ADMIN, BOB, CAROL];
+  members.adm = [OTHER_ADMIN, CAROL];
+  hooks.jira = site();
+  const third = (await snapshot(OTHER_ADMIN)).reviewId;
+  const next = await getReviewMeta(third);
+  assert.equal(next.previousReviewId, first);
+  assert.deepEqual(next.changes.counts, { added: 0, removed: 0, becameAdmin: 1, gainedProducts: 1 });
+  assert.deepEqual(next.changes.removed, []);
+  assert.ok(!(await getReviewRows(third)).some((r) => r.newSinceLast));
 });
 
 test('no closed account: nothing changes but the report state', async () => {

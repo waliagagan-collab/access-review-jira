@@ -1,4 +1,5 @@
 import api, { route } from '@forge/api';
+import { isClosedAccount } from './review.js';
 
 /**
  * Every Jira read the app makes, and every rule about what counts as
@@ -122,10 +123,11 @@ const BULK_CONCURRENCY = 5;
 /**
  * Resolve display names and emails for account IDs at read time. The result
  * always reflects current profiles and privacy settings, and it means no
- * name or email is ever written to storage.
+ * name or email is ever written to storage. The marker of a closed account
+ * is not an account, so Jira is never asked about one.
  */
 export async function fetchUsersBulk(accountIds) {
-  const ids = [...new Set((accountIds ?? []).filter(Boolean))];
+  const ids = [...new Set((accountIds ?? []).filter((id) => id && !isClosedAccount(id)))];
   const chunks = [];
   for (let i = 0; i < ids.length; i += BULK_PAGE) chunks.push(ids.slice(i, i + BULK_PAGE));
   const out = {};

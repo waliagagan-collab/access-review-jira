@@ -1,4 +1,5 @@
 import { utcDay, utcStamp } from '../lib/ui.js';
+import { isClosedAccount } from '../lib/review.js';
 
 /**
  * Pure: a decorated review -> the sheets of the evidence workbook. No Forge
@@ -21,6 +22,9 @@ const activity = (r) => {
   return r.lastActivityAt ? `Active (last seen ${day(r.lastActivityAt)})` : 'Active in the window';
 };
 
+/** A closed account's row has a marker, not an ID: its Account ID cell is empty, and its name says "Closed account". */
+const accountCell = (id) => (isClosedAccount(id) ? '' : (id ?? ''));
+
 const totals = (s) =>
   s ? `${s.keep ?? 0} keep, ${s.remove ?? 0} remove, ${s.flag ?? 0} follow up, ${s.undecided ?? 0} undecided` : 'totals not recorded';
 
@@ -34,8 +38,10 @@ function changesTable(review, rows) {
   const head = ['Change', 'Display name', 'Email', 'Account ID', 'Detail'];
   if (!review.changes) return [head, ['No earlier signed-off review to compare with', '', '', '', '']];
   const counts = review.changes.counts ?? {};
-  const person = (r) => [r.displayName ?? '(unknown)', r.email ?? '', r.accountId];
-  const more = (label, total, listed) => (total > listed ? [[label, '', '', '', `${total - listed} more not listed`]] : []);
+  const person = (r) => [r.displayName ?? '(unknown)', r.email ?? '', accountCell(r.accountId)];
+  // The record names up to 500 of each, and none whose Atlassian account was closed since.
+  const more = (label, total, listed) =>
+    total > listed ? [[label, '', '', '', `${total - listed} more not listed: over the 500 kept, or their Atlassian account was closed`]] : [];
 
   const gone = review.gone ?? [];
   // Reviews saved before rows carried their gained products keep a list in the record.
@@ -58,6 +64,7 @@ function changesTable(review, rows) {
 /** Pure: a decorated review -> the sheets of the evidence workbook. */
 export function sheetsOf(review, rows, stats) {
   const signedOff = review.status === 'complete';
+  const closed = rows.filter((r) => isClosedAccount(r.accountId)).length;
   const summary = [
     ['Item', 'Value'],
     ['Review', `Access review ${day(review.startedAt)}`],
@@ -70,6 +77,8 @@ export function sheetsOf(review, rows, stats) {
     ...(review.signoffs ?? []).map((s, i) => [`Earlier sign-off ${i + 1}`, signoffLine(s)]),
     ['Activity window (days)', review.days ?? ''],
     ['Users reviewed', review.counts?.users ?? rows.length],
+    // The weekly personal data report keeps their rows and decisions, without the account ID or the note.
+    ...(closed ? [['Users whose Atlassian account was closed since the snapshot', closed]] : []),
     ['In admin groups', review.counts?.admins ?? ''],
     ['Users with no activity in the window', review.counts?.inactive ?? ''],
     ['Users whose activity was not checked', review.counts?.unchecked ?? 0],
@@ -91,7 +100,7 @@ export function sheetsOf(review, rows, stats) {
     ...rows.map((r) => [
       r.displayName,
       r.email ?? '',
-      r.accountId,
+      accountCell(r.accountId),
       (r.products ?? []).join(' / ') || 'none',
       (r.groupNames ?? []).join(' / '),
       r.admin ? 'Yes' : 'No',

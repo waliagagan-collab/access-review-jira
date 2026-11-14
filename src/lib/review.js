@@ -49,6 +49,8 @@ export const closedMarker = (page, index) => `${CLOSED_PREFIX}${page}.${index}`;
 export const isClosedAccount = (id) => typeof id === 'string' && id.startsWith(CLOSED_PREFIX);
 /** What the page and the evidence file show for that person, and for an admin whose account was closed. */
 export const CLOSED_ACCOUNT_NAME = 'Closed account';
+/** Pure: rows that are people, leaving out closed accounts. */
+const people = (rows) => (rows ?? []).filter((r) => !isClosedAccount(r?.accountId));
 
 /**
  * Pure: a user record from the scan -> a review row.
@@ -104,10 +106,11 @@ export function groupSummary(groupsAll, rows) {
  * Pure: mark each current row with what changed for that person since the
  * previous review. Rows carry their own flags, so there is no cap. Someone
  * who sits in an admin group now and was absent or not an admin before is a
- * new admin, whether or not the account itself is new.
+ * new admin, whether or not the account itself is new. A closed account in
+ * the previous review is nobody to compare with.
  */
 export function flagChanges(current, previous) {
-  const prev = new Map((previous ?? []).map((r) => [r.accountId, r]));
+  const prev = new Map(people(previous).map((r) => [r.accountId, r]));
   return (current ?? []).map((r) => {
     const p = prev.get(r.accountId);
     const flags = {};
@@ -124,11 +127,12 @@ const CAP = 500;
 /**
  * Pure: what changed since the previous review, by account id. The lists are
  * capped so the review record stays small (rows carry their own flags); the
- * counts are always exact.
+ * counts are always exact. A closed account on either side is not counted as
+ * a person who left or joined.
  */
 export function diffReviews(current, previous) {
-  const prev = new Map((previous ?? []).map((r) => [r.accountId, r]));
-  const cur = new Map((current ?? []).map((r) => [r.accountId, r]));
+  const prev = new Map(people(previous).map((r) => [r.accountId, r]));
+  const cur = new Map(people(current).map((r) => [r.accountId, r]));
   const added = [];
   const removed = [];
   const becameAdmin = [];
@@ -212,14 +216,24 @@ export function signoffHistory(meta) {
       {
         completedAt: meta.completedAt,
         completedBy: meta.completedBy ?? null,
+        ...(meta.completedByClosed ? { completedByClosed: true } : {}),
         stats: meta.stats ?? null,
         reopenedAt: meta.reopenedAt ?? null,
         reopenedBy: meta.reopenedBy ?? null,
+        ...(meta.reopenedByClosed ? { reopenedByClosed: true } : {}),
       },
     ];
   }
   return [];
 }
+
+/**
+ * Pure: the name to show for a "who" field (started, signed off, reopened,
+ * decided by). The personal data report clears the account ID of an admin
+ * whose account was closed and sets the field's flag (`closed`); a field that
+ * holds an ID always shows that person.
+ */
+export const whoName = (id, closed, names) => (id ? (names?.[id]?.displayName ?? '(unknown)') : closed ? CLOSED_ACCOUNT_NAME : null);
 
 /**
  * Pure: a review record as the page and the evidence file should see it. The
@@ -229,10 +243,10 @@ export function signoffHistory(meta) {
 export function withSignoffs(meta) {
   if (!meta) return meta;
   const signoffs = signoffHistory(meta);
-  return meta.status === 'complete'
-    ? { ...meta, signoffs }
-    : { ...meta, signoffs, completedAt: null, completedBy: null, stats: null };
+  if (meta.status === 'complete') return { ...meta, signoffs };
+  const { completedByClosed, ...open } = meta;
+  return { ...open, signoffs, completedAt: null, completedBy: null, stats: null };
 }
 
-/** Pure: which rows "Keep all active non-admins" marks. Rows that were not checked are never among them. */
-export const isActiveNonAdmin = (r) => Boolean(r?.active) && !r?.admin && !r?.unchecked;
+/** Pure: which rows "Keep all active non-admins" marks. Rows that were not checked, and closed accounts, are never among them. */
+export const isActiveNonAdmin = (r) => Boolean(r?.active) && !r?.admin && !r?.unchecked && !isClosedAccount(r?.accountId);

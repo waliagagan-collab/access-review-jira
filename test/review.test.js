@@ -17,6 +17,9 @@ import {
   withSignoffs,
   isActiveNonAdmin,
   MAX_NOTE,
+  closedMarker,
+  isClosedAccount,
+  whoName,
 } from '../src/lib/review.js';
 import { activityOf } from '../src/worker.js';
 import { sheetsOf, fileStamp } from '../src/frame/evidence.js';
@@ -316,7 +319,7 @@ test('the Changes sheet names who is gone, who was added, who gained a product a
   assert.deepEqual(changes.slice(1), [
     ['Gone', 'Gone One', 'g1@x.com', 'g1', 'In the previous review, not in this one'],
     ['Gone', '(unknown)', '', 'g2', 'In the previous review, not in this one'],
-    ['Gone', '', '', '', '1 more not listed'],
+    ['Gone', '', '', '', '1 more not listed: over the 500 kept, or their Atlassian account was closed'],
     ['Added', 'New Admin', 'n1@x.com', 'n1', 'Not in the previous review'],
     ['Gained a Jira product', 'Gained', '', 'gp', 'Jira Software'],
     ['Gained a Jira product', 'Old Shape', '', 'old-shape', 'Jira Service Management'],
@@ -325,4 +328,39 @@ test('the Changes sheet names who is gone, who was added, who gained a product a
   ]);
   // The first review on a site has nothing to compare with.
   assert.deepEqual(sheetsOf({ ...review, changes: null }, rows, {})[3].table[1][0], 'No earlier signed-off review to compare with');
+});
+
+test('a closed account is nobody who left or joined, is never bulk-kept, and an admin whose account was closed reads "Closed account"', () => {
+  const closed = closedMarker(0, 2);
+  assert.equal(closed, '~closed:0.2');
+  assert.equal(isClosedAccount(closed), true);
+  for (const id of ['5b10ac8d82e05b22cc7d4e01', '712020:2a1b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', '', null, undefined, 7]) assert.equal(isClosedAccount(id), false, String(id));
+
+  const previous = [
+    { accountId: 'a', products: ['Jira Software'], admin: false },
+    { accountId: closed, products: ['Jira Software'], admin: true },
+  ];
+  const current = [{ accountId: 'a', products: ['Jira Software'], admin: false }, { accountId: 'b', products: [], admin: false }];
+  const d = diffReviews(current, previous);
+  assert.deepEqual(d.counts, { added: 1, removed: 0, becameAdmin: 0, gainedProducts: 0 });
+  assert.deepEqual(d.added, ['b']);
+  assert.deepEqual(flagChanges(current, previous).map((r) => Boolean(r.newSinceLast)), [false, true]);
+  // A review whose own rows include a marker: it is not counted on either side.
+  assert.deepEqual(diffReviews(previous, current).counts, { added: 0, removed: 1, becameAdmin: 0, gainedProducts: 0 });
+
+  assert.equal(isActiveNonAdmin({ accountId: closed, active: true, admin: false }), false);
+  assert.equal(isActiveNonAdmin({ accountId: 'a', active: true, admin: false }), true);
+
+  const names = { a: { displayName: 'Ann' } };
+  assert.equal(whoName('a', false, names), 'Ann');
+  assert.equal(whoName('a', true, names), 'Ann', 'a field that holds an ID shows that person');
+  assert.equal(whoName('x', false, names), '(unknown)');
+  assert.equal(whoName(null, true, names), 'Closed account');
+  assert.equal(whoName(null, false, names), null);
+
+  // The flags travel with an old-shape sign-off, and an open review shows no sign-off.
+  const legacy = { status: 'open', completedAt: 'x', completedBy: null, completedByClosed: true, reopenedAt: 'y', reopenedBy: null, reopenedByClosed: true };
+  assert.deepEqual(signoffHistory(legacy), [{ completedAt: 'x', completedBy: null, completedByClosed: true, stats: null, reopenedAt: 'y', reopenedBy: null, reopenedByClosed: true }]);
+  assert.equal('completedByClosed' in withSignoffs(legacy), false);
+  assert.equal(withSignoffs({ ...legacy, status: 'complete' }).completedByClosed, true);
 });

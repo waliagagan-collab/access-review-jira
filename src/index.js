@@ -25,7 +25,17 @@ import {
 import { fetchUsersBulk } from './lib/jira.js';
 import { adminOnly } from './lib/admin.js';
 import { normaliseDays, isStale, licenseGate, licenseMessage } from './lib/scan.js';
-import { normaliseDecision, normaliseNote, decisionStats, signoffHistory, withSignoffs, isActiveNonAdmin } from './lib/review.js';
+import {
+  normaliseDecision,
+  normaliseNote,
+  decisionStats,
+  signoffHistory,
+  withSignoffs,
+  isActiveNonAdmin,
+  isClosedAccount,
+  whoName,
+  CLOSED_ACCOUNT_NAME,
+} from './lib/review.js';
 import { utcDay } from './lib/ui.js';
 
 // Forge bundles this ESM file with webpack, and the CommonJS `@forge/resolver`
@@ -195,7 +205,9 @@ define('getStatus', async () => {
 /**
  * Stored rows carry account IDs only. Names and emails are attached here, at
  * read time, so they are always current and never sit in storage. Decisions
- * and group names are attached the same way.
+ * and group names are attached the same way. A closed account's row carries
+ * a marker instead of the ID (personal data report): it shows as "Closed
+ * account", with no email.
  */
 async function decorate(meta, groups, rows) {
   const [people, decisions] = await Promise.all([fetchUsersBulk(rows.map((r) => r.accountId)), getDecisions(meta)]);
@@ -205,14 +217,16 @@ async function decorate(meta, groups, rows) {
   const becameAdmin = new Set(meta.changes?.becameAdmin ?? []);
   return rows.map((r) => {
     const d = decisions[r.accountId];
+    const closed = isClosedAccount(r.accountId);
     return {
       ...r,
-      displayName: people[r.accountId]?.displayName ?? '(unknown)',
-      email: people[r.accountId]?.email ?? null,
+      displayName: closed ? CLOSED_ACCOUNT_NAME : (people[r.accountId]?.displayName ?? '(unknown)'),
+      email: closed ? null : (people[r.accountId]?.email ?? null),
       groupNames: (r.groups ?? []).map((id) => groupName[id] ?? id),
       decision: d?.decision ?? null,
       note: d?.note ?? '',
       decidedBy: d?.by ?? null,
+      decidedByClosed: Boolean(d?.byClosed),
       decidedAt: d?.at ?? null,
       newSinceLast: Boolean(r.newSinceLast ?? added.has(r.accountId)),
       becameAdmin: Boolean(r.becameAdmin ?? becameAdmin.has(r.accountId)),
@@ -235,7 +249,8 @@ define('getReview', async ({ payload }) => {
   const names = await fetchUsersBulk(
     [meta.startedBy, meta.completedBy, ...history.flatMap((h) => [h.completedBy, h.reopenedBy]), ...rows.map((r) => r.decidedBy), ...goneIds].filter(Boolean)
   );
-  const name = (id) => (id ? (names[id]?.displayName ?? '(unknown)') : null);
+  // A "who" field the personal data report cleared reads "Closed account".
+  const name = (id, closed = false) => whoName(id, closed, names);
   const { groups: inline, ...rest } = withSignoffs(meta);
   return {
     ok: true,
@@ -243,12 +258,12 @@ define('getReview', async ({ payload }) => {
     review: {
       ...rest,
       groups: page === 0 ? groups : [],
-      startedByName: name(meta.startedBy),
-      completedByName: name(rest.completedBy),
-      signoffs: history.map((h) => ({ ...h, completedByName: name(h.completedBy), reopenedByName: name(h.reopenedBy) })),
+      startedByName: name(meta.startedBy, meta.startedByClosed),
+      completedByName: name(rest.completedBy, rest.completedByClosed),
+      signoffs: history.map((h) => ({ ...h, completedByName: name(h.completedBy, h.completedByClosed), reopenedByName: name(h.reopenedBy, h.reopenedByClosed) })),
       gone: goneIds.map((id) => ({ accountId: id, displayName: name(id), email: names[id]?.email ?? null })),
     },
-    rows: rows.map((r) => ({ ...r, decidedByName: name(r.decidedBy) })),
+    rows: rows.map((r) => ({ ...r, decidedByName: name(r.decidedBy, r.decidedByClosed) })),
     page,
     pages,
   };
@@ -272,7 +287,9 @@ define('setDecision', reportBusy(async ({ payload, context }) => {
   if (!accountId) return { ok: false, error: 'No account given.' };
   const decision = normaliseDecision(payload?.decision);
   // Clearing the decision clears its note: the entry is removed as a whole.
-  const note = decision ? normaliseNote(payload?.note) : '';
+  // A closed account's row can be decided but takes no note: the report
+  // erased what admins wrote about that person.
+  const note = decision && !isClosedAccount(accountId) ? normaliseNote(payload?.note) : '';
   const at = new Date().toISOString();
   const saved = await setDecisions(meta, [{ accountId, decision, note, by: context?.accountId ?? null, at }]);
   // A sign-off landed between the check above and the write: nothing was saved.
@@ -368,7 +385,15 @@ define('reopenReview', async ({ payload, context }) => {
     status: 'open',
     signoffs: [
       ...signoffHistory(meta),
-      { completedAt: meta.completedAt ?? null, completedBy: meta.completedBy ?? null, stats: meta.stats ?? null, reopenedAt, reopenedBy },
+      {
+        completedAt: meta.completedAt ?? null,
+        completedBy: meta.completedBy ?? null,
+        // The admin who signed off had their account closed (personal data report).
+        ...(meta.completedByClosed && !meta.completedBy ? { completedByClosed: true } : {}),
+        stats: meta.stats ?? null,
+        reopenedAt,
+        reopenedBy,
+      },
     ],
     completedAt: null,
     completedBy: null,

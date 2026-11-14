@@ -64,6 +64,12 @@ test('the page sends decisions one at a time and lets the server pick and count'
   assert.ok(ui.includes('setStatusError(true)') && ui.includes('Could not load your reviews'), 'a failed status call is shown, not hidden');
 });
 
+test('the page shows a closed account plainly and offers no note for it', () => {
+  const ui = read('../src/frontend/index.jsx');
+  assert.ok(ui.includes('Atlassian account closed. Its account ID and any note were erased.'));
+  assert.match(ui, /\{!isClosedAccount\(r\.accountId\) && \(\s*<Button spacing="compact" appearance="subtle" onClick=\{\(\) => openNote\(r\)\}/);
+});
+
 test('the page and the evidence frame use the same event names and the same date helpers', () => {
   const ui = read('../src/frontend/index.jsx');
   const frame = read('../src/frame/index.js');
