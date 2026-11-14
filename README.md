@@ -81,7 +81,9 @@ and emails are never stored; they are resolved from Jira at read time. The accou
 reported to Atlassian once a week, and those of closed accounts are erased (see "Personal
 data reporting" below).
 
-12 reviews are kept. A new snapshot removes the oldest review that is not signed off. A
+12 reviews are kept. A new snapshot removes the oldest review that is not signed off. Before
+it starts, the page names that review and its date and asks; the snapshot starts only for the
+review the admin agreed to (`startReview` returns `confirmRemove` until then). A
 signed-off review is never removed automatically: when all 12 are signed off, starting a new
 review is refused until an admin downloads and deletes one.
 

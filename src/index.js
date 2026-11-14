@@ -9,6 +9,7 @@ import {
   setScanState,
   clearRun,
   listReviews,
+  reviewsToDrop,
   getReviewMeta,
   setReviewMeta,
   getReviewRows,
@@ -115,6 +116,19 @@ define('startReview', async ({ payload, context }) => {
       ok: false,
       full: true,
       error: `Access Review keeps ${KEEP_REVIEWS} reviews and all of them are signed off. Download the evidence for the oldest one (snapshot of ${utcDay(oldest.generatedAt)}), delete it under Past reviews, then start again.`,
+    };
+  }
+
+  // Otherwise the review that will make room is removed with its decisions
+  // and notes when the new snapshot is saved. The admin is told which one and
+  // agrees first; the page sends back the IDs it showed.
+  const dropping = reviewsToDrop([{ id: null, status: 'open' }, ...reviews]);
+  const agreed = Array.isArray(payload?.remove) ? payload.remove.map(String) : [];
+  if (dropping.some((id) => !agreed.includes(String(id)))) {
+    const byId = new Map(reviews.map((r) => [r.id, r]));
+    return {
+      ok: false,
+      confirmRemove: dropping.map((id) => ({ id, generatedAt: byId.get(id)?.generatedAt ?? null })),
     };
   }
 

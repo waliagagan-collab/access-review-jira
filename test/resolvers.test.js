@@ -312,12 +312,32 @@ test('a new review is refused when all twelve kept reviews are signed off, and n
   assert.equal(await getScanState(), undefined, 'nothing was started');
   assert.equal(pushed.length, 0);
 
-  // One review that is not signed off is enough: it will make room.
+  // One review that is not signed off is enough: it will make room, once the
+  // admin agrees to lose it.
   await setReviewMeta('1003', { status: 'open' });
-  const started = await call(handler, 'startReview', { days: 90 }, as('admin-1'));
+  await setReviewMeta('1007', { status: 'open' });
+  const asked = await call(handler, 'startReview', { days: 90 }, as('admin-1'));
+  assert.equal(asked.ok, false);
+  assert.deepEqual(asked.confirmRemove, [{ id: '1003', generatedAt: '2026-03-05T00:00:00.000Z' }], 'the oldest open review, not the newer one');
+  assert.equal(await getScanState(), undefined, 'nothing was started before the admin agreed');
+  assert.equal(pushed.length, 0);
+  const otherAgreed = await call(handler, 'startReview', { days: 90, remove: ['1007'] }, as('admin-1'));
+  assert.deepEqual(otherAgreed.confirmRemove.map((r) => r.id), ['1003'], 'agreeing to another review is not agreeing to this one');
+
+  const started = await call(handler, 'startReview', { days: 90, remove: ['1003'] }, as('admin-1'));
   assert.equal(started.ok, true);
   assert.equal(started.state.startedBy, 'admin-1');
   assert.deepEqual(pushed, [{ run: started.state.run, seq: 0 }]);
+});
+
+test('a new review starts without asking while fewer than twelve reviews are kept', async () => {
+  reset();
+  for (let i = 1; i < KEEP_REVIEWS; i++) {
+    await saveReview({ id: String(1000 + i), status: 'open', generatedAt: `2026-${String(i).padStart(2, '0')}-05T00:00:00.000Z` }, [row('u1')], []);
+  }
+  const started = await call(handler, 'startReview', { days: 90 }, as('admin-1'));
+  assert.equal(started.ok, true);
+  assert.equal(started.confirmRemove, undefined);
 });
 
 // --- a paused run ----------------------------------------------------------------------

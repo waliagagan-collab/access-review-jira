@@ -182,6 +182,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
   const [message, setMessage] = useState(null);
   const [showHow, setShowHow] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [removeAsk, setRemoveAsk] = useState(null);
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState('');
   const [query, setQuery] = useState('');
@@ -219,12 +220,15 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
     return () => clearInterval(id);
   }, [running, refresh]);
 
-  const start = async () => {
+  // `remove` is the list of reviews the admin agreed may go to make room.
+  const start = async (remove) => {
+    setRemoveAsk(null);
     setBusy(true);
     setMessage(null);
     try {
-      const res = await invoke('startReview', { days: Number(period.value) });
-      if (!res?.ok) setMessage(res?.error ?? 'Could not start the review.');
+      const res = await invoke('startReview', { days: Number(period.value), ...(Array.isArray(remove) ? { remove } : {}) });
+      if (res?.confirmRemove) setRemoveAsk(res.confirmRemove);
+      else if (!res?.ok) setMessage(res?.error ?? 'Could not start the review.');
       await refresh();
     } catch (err) {
       setMessage(
@@ -406,7 +410,7 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
     <Stack space="space.200">
       <HowItWorks compact={Boolean(review) && !showHow} onToggle={review ? () => setShowHow((v) => !v) : null} />
 
-      <StartReview gate={gate} running={running} stale={stale} busy={busy} onStart={start} period={period} setPeriod={setPeriod} hasReviews={hasReviews} />
+      <StartReview gate={gate} running={running} stale={stale} busy={busy} onStart={() => start()} period={period} setPeriod={setPeriod} hasReviews={hasReviews} />
 
       {message && (
         <SectionMessage appearance="warning">
@@ -682,6 +686,39 @@ function ReviewPanel({ gate, status, refresh, review, rows, setRows, reload, loa
           <Frame key={`${review.id}-${review.status}`} resource="export-frame" />
         </Stack>
       )}
+
+      <ModalTransition>
+        {removeAsk && (
+          <Modal onClose={() => setRemoveAsk(null)}>
+            <ModalHeader>
+              <ModalTitle appearance="warning">
+                {removeAsk.length === 1
+                  ? `Remove the review from ${fmtDate(removeAsk[0].generatedAt)}?`
+                  : `Remove ${removeAsk.length} reviews that are not signed off?`}
+              </ModalTitle>
+            </ModalHeader>
+            <ModalBody>
+              <Stack space="space.100">
+                <Text>
+                  The app keeps 12 reviews. When the new snapshot is saved,{' '}
+                  {removeAsk.length === 1
+                    ? `the review from ${fmtDate(removeAsk[0].generatedAt)}, which is not signed off, is removed with its decisions and notes.`
+                    : `the reviews from ${removeAsk.map((r) => fmtDate(r.generatedAt)).join(', ')}, which are not signed off, are removed with their decisions and notes.`}
+                </Text>
+                <Text>To keep a review, cancel, then open it under Past reviews and sign it off, or download its evidence first.</Text>
+              </Stack>
+            </ModalBody>
+            <ModalFooter>
+              <Button appearance="subtle" onClick={() => setRemoveAsk(null)}>
+                Cancel
+              </Button>
+              <Button appearance="warning" onClick={() => start(removeAsk.map((r) => r.id))}>
+                Start the review
+              </Button>
+            </ModalFooter>
+          </Modal>
+        )}
+      </ModalTransition>
 
       <ModalTransition>
         {confirmOpen && review && (
