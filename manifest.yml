@@ -6,6 +6,12 @@ modules:
       resolver:
         function: resolver
       title: Access Review
+  scheduledTrigger:
+    # The weekly personal data report: each run does a slice of it, or
+    # nothing when this week's report is done.
+    - key: personal-data-report
+      function: personal-data
+      interval: hour
   consumer:
     - key: scan-consumer
       queue: scan-queue
@@ -22,6 +28,10 @@ modules:
       # slices keep a snapshot well inside Forge's limit of 1,000 queue pushes
       # in one chain.
       timeoutSeconds: 300
+    - key: personal-data
+      handler: privacy.scheduled
+      # Slices stop themselves at SOFT_BUDGET_MS (40 s); this is the hard ceiling.
+      timeoutSeconds: 60
 resources:
   - key: main
     path: src/frontend/index.jsx
@@ -37,8 +47,10 @@ app:
   id: ari:cloud:ecosystem::app/37b81c92-ff57-40a7-8706-f459ac83d2d1
 permissions:
   scopes:
-    # Every scope is read-only. There is deliberately no write scope, so the
-    # platform itself prevents this app from changing anything.
+    # Every scope that touches Jira is read-only. There is deliberately no
+    # write scope, so the platform itself prevents this app from changing
+    # anything. report:personal-data only sends Atlassian the account IDs the
+    # app keeps.
     - read:jira-user # confirms the person using the app is a Jira administrator (/mypermissions, as that user)
     - read:jira-work # recent issue activity: who did what, and when
     - read:application-role:jira # which groups grant which Jira product, and Atlassian's seat counts
@@ -46,3 +58,4 @@ permissions:
     - read:user:jira # active flag and account type, to leave out bots and customers; names and emails at display time
     - read:avatar:jira # required alongside read:user:jira by the group-member endpoint
     - storage:app
+    - report:personal-data # the weekly report of stored account IDs, so data of closed accounts is erased

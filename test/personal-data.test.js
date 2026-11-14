@@ -10,6 +10,7 @@ import { getScanState, getReviewMeta, getReviewRows, getDecisions, shardOf, deci
 import { closedMarker, isClosedAccount } from '../src/lib/review.js';
 import { runSlice, kvsStore } from '../src/lib/privacy.js';
 import * as personal from '../src/lib/personal-data.js';
+import { scheduled } from '../src/privacy.js';
 
 /**
  * The weekly personal data report on a fake site. Snapshots store the
@@ -372,6 +373,33 @@ test('a run cut short between the decisions and the rows is ended by the next on
   const rows = await getReviewRows(first);
   assert.equal(rows.find((r) => isClosedAccount(r.accountId)).accountId, marker[ALICE]);
   assert.deepEqual((await getDecisions(await getReviewMeta(first)))[marker[ALICE]], { ...decided[ALICE], note: '' });
+});
+
+test('the hourly trigger runs the report and logs one line per run, with the totals at the end and never an account', async () => {
+  reset();
+  await buildSite();
+  actionsOver();
+  hooks.closed.push(ALICE);
+  const lines = [];
+  const log = console.log;
+  console.log = (...args) => lines.push(args.join(' '));
+  try {
+    for (let i = 0; i < 10 && data.get('pdr:state')?.phase !== 'idle'; i++) assert.deepEqual(await scheduled(), { statusCode: 200 });
+    assert.equal(data.get('pdr:state').phase, 'idle');
+    await scheduled();
+    // Storage failing for a whole run is logged and the trigger still answers.
+    hooks.failStorage = 100;
+    assert.deepEqual(await scheduled(), { statusCode: 200 });
+    hooks.failStorage = 0;
+  } finally {
+    console.log = log;
+  }
+  assert.ok(!storedText().includes(ALICE));
+  assert.ok(lines.length >= 3);
+  assert.ok(lines.every((l) => l.startsWith('Personal data report: ')));
+  assert.ok(lines.some((l) => /step idle, accounts 7, closed 1, values changed \d+, skipped 0$/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => l === 'Personal data report: did not run, step idle'), 'a week not over yet: nothing to do');
+  for (const id of PEOPLE) assert.ok(!lines.join('\n').includes(id));
 });
 
 // --- when erasing waits --------------------------------------------------------------

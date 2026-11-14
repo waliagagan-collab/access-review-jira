@@ -81,3 +81,13 @@ test('the queue consumer has room for long slices', () => {
   const worker = read('../src/worker.js');
   assert.match(worker, /softBudgetMs: 240_000/);
 });
+
+test('the personal data report runs from an hourly trigger, with the one new scope', async () => {
+  const manifest = read('../manifest.yml');
+  const mod = await import('../src/privacy.js');
+  assert.equal(typeof mod.scheduled, 'function');
+  assert.match(manifest, /scheduledTrigger:\n(?:\s+#.*\n)*\s+- key: personal-data-report\n\s+function: personal-data\n\s+interval: hour/);
+  assert.match(manifest, /- key: personal-data\n\s+handler: privacy\.scheduled\n(?:\s+#.*\n)*\s+timeoutSeconds: 60/);
+  const scopes = [...manifest.split('scopes:')[1].matchAll(/^\s+- ([\w:.-]+)/gm)].map((m) => m[1]);
+  assert.deepEqual(scopes, ['read:jira-user', 'read:jira-work', 'read:application-role:jira', 'read:group:jira', 'read:user:jira', 'read:avatar:jira', 'storage:app', 'report:personal-data']);
+});
