@@ -286,6 +286,13 @@ export const BUSY_MESSAGE = 'A snapshot, a sign-off, a reopen, a bulk decision o
 /** The characters this app's stored keys use after a prefix (see narrower in privacy.js). */
 const KEY_CHARS = '0123456789:abcdefghijklmnopqrstuvwxyz';
 
+/** Reads `keys`, a few at a time, in order. */
+async function readAll(store, keys) {
+  const out = [];
+  for (let i = 0; i < keys.length; i += 8) out.push(...(await Promise.all(keys.slice(i, i + 8).map((k) => store.get(k)))));
+  return out;
+}
+
 /**
  * Takes the closed accounts out of one review, as described at the top: the
  * decisions first, then the rows, then the record. `meta` is the record as
@@ -293,8 +300,8 @@ const KEY_CHARS = '0123456789:abcdefghijklmnopqrstuvwxyz';
  */
 async function eraseReview(store, live, lock, id, meta, closed) {
   const shards = decisionShardsOf(meta);
-  const pages = [];
-  for (let i = 0; i < (Number(meta.pages) || 0); i++) pages.push(rowsOf(await store.get(rowsKey(id, i))));
+  const count = (n) => Array.from({ length: Math.max(0, Number(n) || 0) }, (_, i) => i);
+  const pages = (await readAll(store, count(meta.pages).map((i) => rowsKey(id, i)))).map(rowsOf);
   const markerOf = new Map();
   pages.forEach((rows, i) => rows.forEach((r, j) => closed.has(r?.accountId) && markerOf.set(r.accountId, closedMarker(i, j))));
   let changed = false;
@@ -303,8 +310,7 @@ async function eraseReview(store, live, lock, id, meta, closed) {
   // row, in the shard the marker belongs to, so a later decision on that row
   // in an open review lands on the same entry. Only then does the entry under
   // the account ID go.
-  const held = [];
-  for (let s = 0; s < shards; s++) held.push(await store.get(decisionsKey(id, s)));
+  const held = await readAll(store, count(shards).map((s) => decisionsKey(id, s)));
   const moves = new Map();
   for (const shard of held) {
     for (const [accountId, d] of Object.entries(isObject(shard) ? shard : {})) {
